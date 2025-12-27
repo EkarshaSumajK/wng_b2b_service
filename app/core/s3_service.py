@@ -18,6 +18,7 @@ class S3Service:
             self._client = boto3.client(
                 "s3",
                 region_name=settings.AWS_REGION,
+                endpoint_url=f"https://s3.{settings.AWS_REGION}.amazonaws.com",
                 aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
                 aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
                 config=Config(signature_version="s3v4")
@@ -79,6 +80,23 @@ class S3Service:
                     continue
         
         return flashcards
+
+    def generate_presigned_url(self, key: str, expiration: int = 3600) -> Optional[str]:
+        """Generate a presigned URL for an S3 object."""
+        if not self.client or not settings.AWS_S3_BUCKET:
+            return None
+            
+        try:
+            return self.client.generate_presigned_url(
+                'get_object',
+                Params={
+                    'Bucket': settings.AWS_S3_BUCKET,
+                    'Key': key
+                },
+                ExpiresIn=expiration
+            )
+        except Exception:
+            return None
 
 
 # Singleton instance

@@ -43,6 +43,9 @@ def _build_activity_response(activity, source: str, include_flashcards: bool = F
         # Raw activity_data JSONB - return as-is from database
         "activity_data": activity.activity_data,
         
+        # Extracted thumbnail path from ID pattern
+        "thumbnail_url": s3_service.generate_presigned_url(f"master/thumbnails/{activity.activity_id}.png"),
+        
         # Source tracking
         "source": source,
         "flashcards": None

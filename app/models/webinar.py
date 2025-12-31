@@ -53,7 +53,7 @@ class Webinar(Base):
     # Assignment - school/class targeting
     school_id = Column(UUID(as_uuid=True), ForeignKey("schools.school_id"), nullable=True, index=True)
     class_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=True)  # Specific classes (null = all classes in school)
-    target_audience = Column(SQLEnum(WebinarAudience), nullable=True, default=WebinarAudience.STUDENTS)
+    target_audience = Column(SQLEnum(WebinarAudience, values_callable=lambda x: [e.value for e in x]), nullable=True, default=WebinarAudience.STUDENTS)
     target_grades = Column(ARRAY(String), nullable=True)  # e.g., ["8", "9", "10"]
     
     # Speaker information

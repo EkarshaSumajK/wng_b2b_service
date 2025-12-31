@@ -6,6 +6,9 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     DATABASE_URL_ACTIVITY: Optional[str] = None  # Separate DB for activities
     
+    # Admin Platform Database (for centralized authentication)
+    DATABASE_URL_AUTH: str = "postgresql://neondb_owner:npg_mBKi4vraL5EX@ep-nameless-flower-ah3bcrfe-pooler.c-3.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+    
     # Security
     SECRET_KEY: str
     ALGORITHM: str = "HS256"

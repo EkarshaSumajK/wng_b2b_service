@@ -1,5 +1,6 @@
 from app.models.school import School
 from app.models.user import User
+from app.models.b2b_user import B2BUser
 from app.models.student import Student
 from app.models.class_model import Class
 from app.models.case import Case, JournalEntry
@@ -30,6 +31,7 @@ from app.models.student_engagement import (
 __all__ = [
     "School",
     "User",
+    "B2BUser",
     "Student",
     "Class",
     "Case",

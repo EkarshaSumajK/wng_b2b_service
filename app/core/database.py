@@ -66,3 +66,32 @@ def get_activity_db():
     finally:
         db.close()
 
+
+# Auth Database - uses DATABASE_URL_AUTH for centralized authentication
+auth_engine = create_engine(
+    settings.DATABASE_URL_AUTH,
+    pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=5,
+    pool_recycle=3600,
+    echo=False,
+    connect_args={
+        "connect_timeout": 10,
+    }
+)
+
+AuthSessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=auth_engine,
+    expire_on_commit=False
+)
+
+def get_auth_db():
+    """Get database session for authentication (uses admin platform DB)."""
+    db = AuthSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+

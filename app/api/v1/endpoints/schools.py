@@ -5,7 +5,7 @@ from uuid import UUID
 from datetime import datetime
 import os
 import shutil
-from app.core.database import get_db
+from app.core.database import get_auth_db  # Changed to use auth database
 from app.core.response import success_response
 from app.core.logging_config import get_logger
 from app.models.school import School
@@ -19,7 +19,7 @@ router = APIRouter()
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_school(
     school_data: SchoolCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_auth_db)  # Changed to use auth database
 ):
     logger.info(f"Creating school: {school_data.name}")
     school = School(**school_data.dict())
@@ -33,7 +33,7 @@ async def create_school(
 async def list_schools(
     skip: int = 0,
     limit: int = 100,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_auth_db)  # Changed to use auth database
 ):
     logger.debug("Listing schools")
     schools = db.query(School).offset(skip).limit(limit).all()
@@ -64,7 +64,7 @@ async def list_schools(
 @router.get("/{school_id}")
 async def get_school(
     school_id: UUID,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_auth_db)  # Uses auth database for schools
 ):
     logger.debug(f"Fetching school: {school_id}")
     school = db.query(School).filter(School.school_id == school_id).first()
@@ -96,7 +96,7 @@ async def get_school(
 async def update_school(
     school_id: UUID,
     school_update: SchoolUpdate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_auth_db)  # Uses auth database for schools
 ):
     school = db.query(School).filter(School.school_id == school_id).first()
     if not school:
@@ -112,7 +112,7 @@ async def update_school(
 @router.delete("/{school_id}")
 async def delete_school(
     school_id: UUID,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_auth_db)  # Uses auth database for schools
 ):
     logger.info(f"Deleting school: {school_id}")
     school = db.query(School).filter(School.school_id == school_id).first()
@@ -147,7 +147,7 @@ async def delete_school(
 @router.post("/onboarding", status_code=status.HTTP_201_CREATED)
 async def submit_school_onboarding(
     onboarding_data: SchoolOnboardingRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_auth_db)  # Uses auth database for schools
 ):
     """
     Submit a school onboarding application.
@@ -246,7 +246,7 @@ async def submit_school_onboarding(
 @router.patch("/{school_id}/complete-onboarding")
 async def complete_data_onboarding(
     school_id: UUID,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_auth_db)  # Uses auth database for schools
 ):
     """
     Mark data onboarding as complete for a school.
@@ -277,7 +277,7 @@ async def complete_data_onboarding(
 async def upload_staff_data(
     school_id: UUID,
     file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_auth_db)  # Uses auth database for schools
 ):
     """
     Upload staff (teachers and counsellors) data from Excel file.
@@ -374,7 +374,7 @@ async def upload_staff_data(
 async def upload_students_data(
     school_id: UUID,
     file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_auth_db)  # Uses auth database for schools
 ):
     """
     Upload students and parents data from Excel file.
@@ -527,7 +527,7 @@ async def upload_students_data(
 async def upload_classes_data(
     school_id: UUID,
     file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_auth_db)  # Uses auth database for schools
 ):
     """
     Upload classes data from Excel file.
@@ -622,7 +622,7 @@ async def upload_classes_data(
 async def upload_school_logo(
     school_id: UUID,
     file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_auth_db)  # Uses auth database for schools
 ):
     """
     Upload a school logo.

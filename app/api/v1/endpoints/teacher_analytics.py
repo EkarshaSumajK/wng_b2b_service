@@ -19,7 +19,7 @@ from app.models.assessment import StudentResponse
 from app.models.activity_submission import ActivitySubmission, SubmissionStatus
 from app.models.activity_assignment import ActivityAssignment
 from app.models.student_engagement import (
-    StudentAppSession, StudentStreakSummary
+    StudentAppSession, StudentStreakSummary, StudentWebinarAttendance
 )
 from sqlalchemy.orm import joinedload
 
@@ -953,4 +953,674 @@ async def get_assessment_question_breakdown(
         "title": assessment.title,
         "total_questions": len(questions),
         "question_breakdown": question_breakdown
+    })
+
+
+# ============== 8. TEACHER TRENDS ==============
+
+@router.get("/trends")
+async def get_teacher_trends(
+    teacher_id: UUID,
+    days: int = Query(30, description="Number of days for analytics"),
+    db: Session = Depends(get_db)
+):
+    """Daily completion rates for assessments, activities, and webinars for teacher's classes."""
+    start_date, end_date = get_date_range(days)
+    
+    # Get teacher's student IDs
+    student_ids = get_teacher_student_ids(db, teacher_id)
+    
+    if not student_ids:
+        return success_response({"trends": []})
+
+    # Initialize daily map
+    trends_map = {}
+    current_date = start_date
+    while current_date <= end_date:
+        date_str = current_date.isoformat()
+        trends_map[date_str] = {
+            "date": date_str,
+            "assessments": 0,
+            "activities": 0,
+            "webinars": 0
+        }
+        current_date += timedelta(days=1)
+    
+    # Assessments (by completed_at)
+    assessment_data = db.query(
+        func.date(StudentResponse.completed_at).label('date'),
+        func.count(func.distinct(StudentResponse.student_id)).label('count')
+    ).filter(
+        StudentResponse.student_id.in_(student_ids),
+        StudentResponse.completed_at >= datetime.combine(start_date, datetime.min.time())
+    ).group_by(func.date(StudentResponse.completed_at)).all()
+    
+    # Activities (by submitted_at)
+    activity_data = db.query(
+        func.date(ActivitySubmission.submitted_at).label('date'),
+        func.count(ActivitySubmission.submission_id).label('count')
+    ).filter(
+        ActivitySubmission.student_id.in_(student_ids),
+        ActivitySubmission.submitted_at >= datetime.combine(start_date, datetime.min.time())
+    ).group_by(func.date(ActivitySubmission.submitted_at)).all()
+
+    # Webinars (by created_at of attendance record)
+    webinar_data = db.query(
+        func.date(StudentWebinarAttendance.created_at).label('date'),
+        func.count(StudentWebinarAttendance.id).label('count')
+    ).filter(
+        StudentWebinarAttendance.student_id.in_(student_ids),
+        StudentWebinarAttendance.created_at >= datetime.combine(start_date, datetime.min.time()),
+        StudentWebinarAttendance.attended == True
+    ).group_by(func.date(StudentWebinarAttendance.created_at)).all()
+    
+    total_students = len(student_ids) or 1
+
+    def get_date_str(d):
+        if isinstance(d, str):
+            return d
+        if hasattr(d, 'isoformat'):
+            return d.isoformat()
+        return str(d)
+
+    for row in assessment_data:
+        d_str = get_date_str(row.date)
+        if d_str in trends_map:
+            trends_map[d_str]["assessments"] = min(100, round((row.count / total_students) * 100, 1))
+            
+    for row in activity_data:
+        d_str = get_date_str(row.date)
+        if d_str in trends_map:
+            trends_map[d_str]["activities"] = min(100, round((row.count / total_students) * 100, 1))
+            
+    for row in webinar_data:
+        d_str = get_date_str(row.date)
+        if d_str in trends_map:
+            trends_map[d_str]["webinars"] = min(100, round((row.count / total_students) * 100, 1))
+            
+    return success_response({"trends": list(trends_map.values())})
+
+
+# ============== 9. TEACHER ASSESSMENTS LIST ==============
+
+@router.get("/assessments")
+async def get_teacher_assessments(
+    teacher_id: UUID,
+    class_id: Optional[UUID] = Query(None, description="Filter by specific class"),
+    days: int = Query(30, description="Number of days for analytics"),
+    db: Session = Depends(get_db)
+):
+    """List of assessments with completion stats for teacher's classes."""
+    from app.models.assessment import Assessment, AssessmentTemplate
+    
+    start_date, end_date = get_date_range(days)
+    class_ids = get_teacher_class_ids(db, teacher_id)
+    
+    if not class_ids:
+        return success_response({"assessments": []})
+    
+    # Filter by specific class if provided
+    if class_id:
+        if class_id not in class_ids:
+            raise HTTPException(status_code=403, detail="Access denied. Teacher is not assigned to this class.")
+        class_ids = [class_id]
+    
+    # Get assessment templates with completion stats
+    query = db.query(
+        AssessmentTemplate.template_id,
+        AssessmentTemplate.name,
+        AssessmentTemplate.category,
+        func.count(func.distinct(StudentResponse.student_id)).label('submitted_count'),
+        func.avg(StudentResponse.score).label('avg_score')
+    ).join(Assessment, Assessment.template_id == AssessmentTemplate.template_id
+    ).join(StudentResponse, and_(
+        StudentResponse.assessment_id == Assessment.assessment_id,
+        StudentResponse.completed_at >= datetime.combine(start_date, datetime.min.time())
+    )).filter(Assessment.class_id.in_(class_ids)
+    ).group_by(AssessmentTemplate.template_id, AssessmentTemplate.name, AssessmentTemplate.category).all()
+
+    # Get total students in teacher's classes
+    student_count = db.query(func.count(Student.student_id)).filter(
+        Student.class_id.in_(class_ids)
+    ).scalar() or 1
+    
+    results = []
+    for row in query:
+        results.append({
+            "id": row.template_id,
+            "title": row.name,
+            "category": row.category,
+            "studentsSubmitted": row.submitted_count,
+            "totalStudentsAssigned": student_count,
+            "submissionRate": round((row.submitted_count / student_count) * 100, 1) if student_count > 0 else 0,
+            "avgScore": round(float(row.avg_score), 1) if row.avg_score else 0
+        })
+        
+    return success_response({"assessments": results})
+
+
+# ============== 10. TEACHER ACTIVITIES LIST ==============
+
+@router.get("/activities")
+async def get_teacher_activities(
+    teacher_id: UUID,
+    class_id: Optional[UUID] = Query(None, description="Filter by specific class"),
+    days: int = Query(30, description="Number of days for analytics"),
+    db: Session = Depends(get_db)
+):
+    """List of activities with completion stats for teacher's classes."""
+    from app.models.activity import Activity
+    
+    start_date, end_date = get_date_range(days)
+    class_ids = get_teacher_class_ids(db, teacher_id)
+    
+    if not class_ids:
+        return success_response({"activities": []})
+    
+    if class_id:
+        if class_id not in class_ids:
+            raise HTTPException(status_code=403, detail="Access denied. Teacher is not assigned to this class.")
+        class_ids = [class_id]
+
+    # Get activities with completion stats
+    query = db.query(
+        Activity.activity_id,
+        Activity.title,
+        Activity.type,
+        func.count(func.distinct(ActivitySubmission.student_id)).label('completed_count')
+    ).join(ActivityAssignment, Activity.activity_id == ActivityAssignment.activity_id
+    ).join(ActivitySubmission, and_(
+        ActivitySubmission.assignment_id == ActivityAssignment.assignment_id,
+        ActivitySubmission.status.in_([SubmissionStatus.SUBMITTED, SubmissionStatus.VERIFIED]),
+        ActivitySubmission.submitted_at >= datetime.combine(start_date, datetime.min.time())
+    )).filter(ActivityAssignment.class_id.in_(class_ids)
+    ).group_by(Activity.activity_id, Activity.title, Activity.type).all()
+    
+    # Get total students
+    student_count = db.query(func.count(Student.student_id)).filter(
+        Student.class_id.in_(class_ids)
+    ).scalar() or 1
+    
+    results = []
+    for row in query:
+        results.append({
+            "id": row.activity_id,
+            "title": row.title,
+            "type": row.type.value if row.type else "Activity",
+            "studentsCompleted": row.completed_count,
+            "totalStudentsAssigned": student_count,
+            "completionRate": round((row.completed_count / student_count) * 100, 1) if student_count > 0 else 0
+        })
+    
+    return success_response({"activities": results})
+
+
+# ============== 11. TEACHER WEBINARS LIST ==============
+
+@router.get("/webinars")
+async def get_teacher_webinars(
+    teacher_id: UUID,
+    class_id: Optional[UUID] = Query(None, description="Filter by specific class"),
+    days: int = Query(30, description="Number of days for analytics"),
+    db: Session = Depends(get_db)
+):
+    """List of webinars with attendance stats for teacher's classes."""
+    from app.models.webinar import Webinar, WebinarSchoolRegistration
+    
+    start_date, end_date = get_date_range(days)
+    start_datetime = datetime.combine(start_date, datetime.min.time())
+    
+    class_ids = get_teacher_class_ids(db, teacher_id)
+    if not class_ids:
+        return success_response({"webinars": []})
+    
+    if class_id:
+        if class_id not in class_ids:
+            raise HTTPException(status_code=403, detail="Access denied. Teacher is not assigned to this class.")
+        class_ids = [class_id]
+    
+    # Get school_id from teacher's classes
+    school_id = db.query(Class.school_id).filter(Class.class_id.in_(class_ids)).first()
+    if not school_id:
+        return success_response({"webinars": []})
+    school_id = school_id[0]
+    
+    # Get webinars registered for this school
+    registrations = db.query(WebinarSchoolRegistration).filter(
+        WebinarSchoolRegistration.school_id == school_id
+    ).all()
+    
+    if not registrations:
+        return success_response({"webinars": []})
+
+    webinar_ids = [reg.webinar_id for reg in registrations]
+    webinars = db.query(Webinar).filter(
+        Webinar.webinar_id.in_(webinar_ids),
+        Webinar.date >= start_datetime
+    ).order_by(Webinar.date.desc()).all()
+    
+    if not webinars:
+        return success_response({"webinars": []})
+    
+    results = []
+    for w in webinars:
+        # Count students in teacher's classes
+        total_invited = db.query(func.count(Student.student_id)).filter(
+            Student.class_id.in_(class_ids)
+        ).scalar() or 0
+        
+        # Get attendance count
+        attended = db.query(func.count(StudentWebinarAttendance.id)).join(
+            Student, StudentWebinarAttendance.student_id == Student.student_id
+        ).filter(
+            StudentWebinarAttendance.webinar_id == w.webinar_id,
+            StudentWebinarAttendance.attended == True,
+            Student.class_id.in_(class_ids)
+        ).scalar() or 0
+        
+        results.append({
+            "id": w.webinar_id,
+            "title": w.title,
+            "date": w.date.isoformat() if w.date else None,
+            "studentsAttended": attended,
+            "totalStudentsInvited": total_invited,
+            "attendanceRate": round((attended / total_invited) * 100, 1) if total_invited > 0 else 0
+        })
+    
+    return success_response({"webinars": results})
+
+
+# ============== 12. TEACHER ASSESSMENT DETAILS ==============
+
+@router.get("/assessments/{template_id}/details")
+async def get_teacher_assessment_details(
+    template_id: UUID,
+    teacher_id: UUID,
+    days: int = Query(30, description="Number of days for analytics"),
+    db: Session = Depends(get_db)
+):
+    """Detailed view of a specific assessment for teacher's classes."""
+    from app.models.assessment import Assessment, AssessmentTemplate
+    
+    start_date, end_date = get_date_range(days)
+    class_ids = get_teacher_class_ids(db, teacher_id)
+    
+    if not class_ids:
+        raise HTTPException(status_code=403, detail="Teacher has no assigned classes")
+    
+    template = db.query(AssessmentTemplate).filter(AssessmentTemplate.template_id == template_id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    
+    # Get assessments for teacher's classes
+    assessments = db.query(Assessment).filter(
+        Assessment.template_id == template_id,
+        Assessment.class_id.in_(class_ids)
+    ).all()
+    
+    # Get students from teacher's classes
+    students = db.query(Student).filter(Student.class_id.in_(class_ids)).all()
+    student_map = {s.student_id: s for s in students}
+    
+    # Get class names
+    classes = db.query(Class).filter(Class.class_id.in_(class_ids)).all()
+    class_map = {c.class_id: c.name for c in classes}
+
+    # Get responses
+    responses = db.query(StudentResponse).join(Assessment).filter(
+        Assessment.template_id == template_id,
+        Assessment.class_id.in_(class_ids),
+        StudentResponse.completed_at >= datetime.combine(start_date, datetime.min.time())
+    ).all()
+    
+    response_map = {r.student_id: r for r in responses}
+    max_score = sum([q.get('points', 0) for q in (template.questions or [])]) or 100
+    
+    submissions = []
+    total_score = 0
+    pass_count = 0
+    class_stats = {}
+    
+    for s in students:
+        resp = response_map.get(s.student_id)
+        status = "submitted" if resp else "pending"
+        score = resp.score if resp else 0
+        c_name = class_map.get(s.class_id, "Unknown")
+        
+        if s.class_id not in class_stats:
+            class_stats[s.class_id] = {"className": c_name, "total": 0, "submitted": 0, "total_score": 0}
+        class_stats[s.class_id]["total"] += 1
+        
+        if resp:
+            total_score += score
+            if (score / max_score) >= 0.6:
+                pass_count += 1
+            class_stats[s.class_id]["submitted"] += 1
+            class_stats[s.class_id]["total_score"] += score
+        
+        submissions.append({
+            "studentId": str(s.student_id),
+            "studentName": f"{s.first_name} {s.last_name}",
+            "className": c_name,
+            "status": status,
+            "score": score,
+            "maxScore": max_score,
+            "submittedAt": resp.completed_at.isoformat() if resp else None
+        })
+
+    submitted_count = len(responses)
+    avg_score = round(total_score / submitted_count, 1) if submitted_count else 0
+    pass_rate = round((pass_count / submitted_count) * 100, 1) if submitted_count else 0
+    
+    class_wise_stats = []
+    for cid, data in class_stats.items():
+        avg = data["total_score"] / data["submitted"] if data["submitted"] > 0 else 0
+        class_wise_stats.append({
+            "className": data["className"],
+            "total": data["total"],
+            "submitted": data["submitted"],
+            "avgScore": round(avg, 1)
+        })
+    
+    return success_response({
+        "id": template_id,
+        "title": template.name,
+        "description": template.description,
+        "totalQuestions": len(template.questions or []),
+        "totalStudentsAssigned": len(students),
+        "studentsSubmitted": submitted_count,
+        "studentsPending": len(students) - submitted_count,
+        "avgScore": avg_score,
+        "passRate": pass_rate,
+        "submissions": submissions,
+        "classWiseStats": class_wise_stats
+    })
+
+
+# ============== 13. TEACHER ACTIVITY DETAILS ==============
+
+@router.get("/activities/{activity_id}/details")
+async def get_teacher_activity_details(
+    activity_id: UUID,
+    teacher_id: UUID,
+    days: int = Query(30, description="Number of days for analytics"),
+    db: Session = Depends(get_db)
+):
+    """Detailed view of a specific activity for teacher's classes."""
+    from app.models.activity import Activity
+    
+    class_ids = get_teacher_class_ids(db, teacher_id)
+    if not class_ids:
+        raise HTTPException(status_code=403, detail="Teacher has no assigned classes")
+    
+    activity = db.query(Activity).filter(Activity.activity_id == activity_id).first()
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    
+    # Get assignments for teacher's classes
+    assignments = db.query(ActivityAssignment).filter(
+        ActivityAssignment.activity_id == activity_id,
+        ActivityAssignment.class_id.in_(class_ids)
+    ).all()
+    
+    assigned_class_ids = [a.class_id for a in assignments]
+    
+    # Get students from assigned classes
+    students = db.query(Student).filter(Student.class_id.in_(assigned_class_ids)).all() if assigned_class_ids else []
+    
+    # Get submissions
+    submissions_data = db.query(ActivitySubmission).join(ActivityAssignment).filter(
+        ActivityAssignment.activity_id == activity_id,
+        ActivityAssignment.class_id.in_(class_ids)
+    ).all()
+    
+    sub_map = {s.student_id: s for s in submissions_data}
+
+    completions = []
+    completed_count = 0
+    
+    for s in students:
+        sub = sub_map.get(s.student_id)
+        status = sub.status.value.lower() if sub else "pending"
+        
+        if status in ["submitted", "verified"]:
+            completed_count += 1
+            
+        completions.append({
+            "studentId": str(s.student_id),
+            "studentName": f"{s.first_name} {s.last_name}",
+            "status": status,
+            "submittedAt": sub.submitted_at.isoformat() if sub and sub.submitted_at else None
+        })
+    
+    return success_response({
+        "id": activity_id,
+        "title": activity.title,
+        "type": activity.type.value if activity.type else "Activity",
+        "totalStudentsAssigned": len(students),
+        "studentsCompleted": completed_count,
+        "studentsPending": len(students) - completed_count,
+        "completions": completions
+    })
+
+
+# ============== 14. TEACHER WEBINAR DETAILS ==============
+
+@router.get("/webinars/{webinar_id}/details")
+async def get_teacher_webinar_details(
+    webinar_id: UUID,
+    teacher_id: UUID,
+    db: Session = Depends(get_db)
+):
+    """Detailed view of a specific webinar for teacher's classes."""
+    from app.models.webinar import Webinar
+    
+    class_ids = get_teacher_class_ids(db, teacher_id)
+    if not class_ids:
+        raise HTTPException(status_code=403, detail="Teacher has no assigned classes")
+    
+    webinar = db.query(Webinar).filter(Webinar.webinar_id == webinar_id).first()
+    if not webinar:
+        raise HTTPException(status_code=404, detail="Webinar not found")
+    
+    # Get students from teacher's classes
+    students = db.query(Student).options(
+        joinedload(Student.class_obj)
+    ).filter(Student.class_id.in_(class_ids)).all()
+    
+    # Get attendance records
+    attendance_records = db.query(StudentWebinarAttendance).filter(
+        StudentWebinarAttendance.webinar_id == webinar_id,
+        StudentWebinarAttendance.student_id.in_([s.student_id for s in students])
+    ).all()
+    
+    attendance_map = {att.student_id: att for att in attendance_records}
+
+    attendance_list = []
+    class_wise_stats = {}
+    
+    for student in students:
+        att = attendance_map.get(student.student_id)
+        
+        if att:
+            status = "attended" if att.attended else "absent"
+            attended = att.attended
+            duration = att.watch_duration_minutes
+            watch_percentage = round((att.watch_duration_minutes / webinar.duration_minutes * 100), 1) if att.watch_duration_minutes and webinar.duration_minutes else 0
+        else:
+            status = "absent"
+            attended = False
+            duration = None
+            watch_percentage = 0
+        
+        class_name = student.class_obj.name if student.class_obj else "Unassigned"
+        
+        attendance_list.append({
+            "studentId": str(student.student_id),
+            "studentName": f"{student.first_name} {student.last_name}",
+            "className": class_name,
+            "status": status,
+            "attended": attended,
+            "duration": duration,
+            "watchPercentage": watch_percentage
+        })
+        
+        if class_name not in class_wise_stats:
+            class_wise_stats[class_name] = {"attended": 0, "total": 0, "totalWatchTime": 0, "attendedCount": 0}
+        
+        class_wise_stats[class_name]["total"] += 1
+        if attended:
+            class_wise_stats[class_name]["attended"] += 1
+            class_wise_stats[class_name]["attendedCount"] += 1
+            class_wise_stats[class_name]["totalWatchTime"] += duration or 0
+
+    class_wise_list = []
+    for class_name, stats in class_wise_stats.items():
+        avg_watch_time = stats["totalWatchTime"] / stats["attendedCount"] if stats["attendedCount"] > 0 else 0
+        class_wise_list.append({
+            "className": class_name,
+            "attended": stats["attended"],
+            "total": stats["total"],
+            "avgWatchTime": round(avg_watch_time, 1)
+        })
+    
+    total_invited = len(attendance_list)
+    attended_count = sum(1 for a in attendance_list if a["status"] == "attended")
+    attended_records = [a for a in attendance_list if a["attended"]]
+    avg_watch_pct = sum(a["watchPercentage"] for a in attended_records) / len(attended_records) if attended_records else 0
+    
+    return success_response({
+        "id": str(webinar_id),
+        "title": webinar.title,
+        "topic": webinar.category.value if webinar.category else "General",
+        "description": webinar.description or "",
+        "presenter": webinar.speaker_name or "",
+        "scheduledDate": webinar.date.isoformat() if webinar.date else None,
+        "duration": webinar.duration_minutes or 0,
+        "totalStudentsInvited": total_invited,
+        "studentsAttended": attended_count,
+        "studentsAbsent": total_invited - attended_count,
+        "avgWatchPercentage": round(avg_watch_pct, 1),
+        "attendance": attendance_list,
+        "classWiseStats": class_wise_list
+    })
+
+
+# ============== 15. TEACHER LEADERBOARD ==============
+
+@router.get("/leaderboard")
+async def get_teacher_leaderboard(
+    teacher_id: UUID,
+    type: str = Query(..., description="assessments, activities, webinars"),
+    days: int = Query(30, description="Number of days for analytics"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int = Query(10, ge=1, le=100, description="Items per page"),
+    db: Session = Depends(get_db)
+):
+    """Get top performing students from teacher's classes based on engagement type."""
+    start_date, end_date = get_date_range(days)
+    start_datetime = datetime.combine(start_date, datetime.min.time())
+    
+    class_ids = get_teacher_class_ids(db, teacher_id)
+    if not class_ids:
+        return success_response({"students": [], "total": 0, "page": page, "limit": limit})
+    
+    offset = (page - 1) * limit
+    
+    # Get students from teacher's classes
+    students = db.query(Student).filter(Student.class_id.in_(class_ids)).all()
+    student_map = {s.student_id: s for s in students}
+    student_ids = list(student_map.keys())
+    
+    if not student_ids:
+        return success_response({"students": [], "total": 0, "page": page, "limit": limit})
+    
+    # Get class names
+    class_map = {c.class_id: c.name for c in db.query(Class).filter(Class.class_id.in_(class_ids)).all()}
+    
+    results = []
+    total_count = 0
+
+    if type == "assessments":
+        base_query = db.query(
+            StudentResponse.student_id,
+            func.avg(StudentResponse.score).label('score'),
+            func.count(func.distinct(StudentResponse.assessment_id)).label('count')
+        ).filter(
+            StudentResponse.student_id.in_(student_ids),
+            StudentResponse.completed_at >= start_datetime
+        ).group_by(StudentResponse.student_id)
+        
+        total_count = base_query.count()
+        data = base_query.order_by(desc('score')).offset(offset).limit(limit).all()
+        
+        for row in data:
+            s = student_map.get(row.student_id)
+            if s:
+                results.append({
+                    "id": str(s.student_id),
+                    "name": f"{s.first_name} {s.last_name}",
+                    "className": class_map.get(s.class_id, "Unknown"),
+                    "score": round(row.score, 1) if row.score else 0,
+                    "scoreLabel": "Avg Score",
+                    "secondaryScore": row.count,
+                    "secondaryLabel": "Assessments",
+                    "riskLevel": s.risk_level.value.lower() if s.risk_level else "low"
+                })
+
+    elif type == "activities":
+        base_query = db.query(
+            ActivitySubmission.student_id,
+            func.count(ActivitySubmission.submission_id).label('count')
+        ).filter(
+            ActivitySubmission.student_id.in_(student_ids),
+            ActivitySubmission.status.in_([SubmissionStatus.SUBMITTED, SubmissionStatus.VERIFIED]),
+            ActivitySubmission.submitted_at >= start_datetime
+        ).group_by(ActivitySubmission.student_id)
+        
+        total_count = base_query.count()
+        data = base_query.order_by(desc('count')).offset(offset).limit(limit).all()
+        
+        for row in data:
+            s = student_map.get(row.student_id)
+            if s:
+                results.append({
+                    "id": str(s.student_id),
+                    "name": f"{s.first_name} {s.last_name}",
+                    "className": class_map.get(s.class_id, "Unknown"),
+                    "score": row.count,
+                    "scoreLabel": "Activities Completed",
+                    "riskLevel": s.risk_level.value.lower() if s.risk_level else "low"
+                })
+
+    elif type == "webinars":
+        base_query = db.query(
+            StudentWebinarAttendance.student_id,
+            func.count(StudentWebinarAttendance.id).label('count')
+        ).filter(
+            StudentWebinarAttendance.student_id.in_(student_ids),
+            StudentWebinarAttendance.attended == True,
+            StudentWebinarAttendance.created_at >= start_datetime
+        ).group_by(StudentWebinarAttendance.student_id)
+        
+        total_count = base_query.count()
+        data = base_query.order_by(desc('count')).offset(offset).limit(limit).all()
+        
+        for row in data:
+            s = student_map.get(row.student_id)
+            if s:
+                results.append({
+                    "id": str(s.student_id),
+                    "name": f"{s.first_name} {s.last_name}",
+                    "className": class_map.get(s.class_id, "Unknown"),
+                    "score": row.count,
+                    "scoreLabel": "Webinars Attended",
+                    "riskLevel": s.risk_level.value.lower() if s.risk_level else "low"
+                })
+
+    return success_response({
+        "students": results,
+        "total": total_count,
+        "page": page,
+        "limit": limit
     })

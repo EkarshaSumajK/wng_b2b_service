@@ -5,10 +5,7 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str
     DATABASE_URL_ACTIVITY: Optional[str] = None  # Separate DB for activities
-    
-    # Admin Platform Database (for centralized authentication)
-    # SECURITY: This should be set via environment variable, not hardcoded
-    DATABASE_URL_AUTH: str
+    DATABASE_URL_AUTH: Optional[str] = None  # Legacy - now uses DATABASE_URL
     
     # Security
     SECRET_KEY: str

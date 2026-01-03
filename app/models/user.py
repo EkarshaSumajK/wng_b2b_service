@@ -4,7 +4,8 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
 import enum
-from app.core.database import Base
+from app.models.base import Base
+
 
 class UserRole(str, enum.Enum):
     COUNSELLOR = "COUNSELLOR"
@@ -14,20 +15,22 @@ class UserRole(str, enum.Enum):
     CLINICIAN = "CLINICIAN"
     ADMIN = "ADMIN"
 
+
 class User(Base):
-    __tablename__ = "users"
+    __tablename__ = "b2b_users"
     
     user_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    school_id = Column(UUID(as_uuid=True), ForeignKey("schools.school_id"), nullable=False)
+    school_id = Column(UUID(as_uuid=True), ForeignKey("b2b_schools.school_id"), nullable=False)
     role = Column(SQLEnum(UserRole), nullable=False)
     email = Column(String, unique=True, nullable=False, index=True)
-    hashed_password = Column(String, nullable=True)
+    hashed_password = Column(String, nullable=True)  # Legacy column
+    password_hash = Column(String(255), nullable=True)  # New column (matches admin platform)
     display_name = Column(String, nullable=False)
     phone = Column(String, nullable=True)
     profile_picture_url = Column(String, nullable=True)
-    profile = Column(JSON, nullable=True)  # qualifications, languages, specialties
-    availability = Column(JSON, nullable=True)  # weekly blocks
-    auth_provider = Column(JSON, nullable=True)  # SSO metadata
+    profile = Column(JSON, nullable=True)
+    availability = Column(JSON, nullable=True)
+    auth_provider = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     

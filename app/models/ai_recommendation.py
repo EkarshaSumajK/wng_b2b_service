@@ -4,7 +4,8 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
 import enum
-from app.core.database import Base
+from app.models.base import Base
+
 
 class RecommendationType(str, enum.Enum):
     INTERVENTION = "INTERVENTION"
@@ -12,13 +13,15 @@ class RecommendationType(str, enum.Enum):
     REFERRAL = "REFERRAL"
     ALERT = "ALERT"
 
+
 class ConfidenceLevel(str, enum.Enum):
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
 
+
 class AIRecommendation(Base):
-    __tablename__ = "ai_recommendations"
+    __tablename__ = "b2b_ai_recommendations"
     
     recommendation_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     type = Column(SQLEnum(RecommendationType), nullable=False)
@@ -26,10 +29,10 @@ class AIRecommendation(Base):
     rationale = Column(Text, nullable=True)
     recommendation = Column(Text, nullable=False)
     model_version = Column(String(50), nullable=True)
-    related_student_id = Column(UUID(as_uuid=True), ForeignKey("students.student_id"), nullable=True)
-    related_case_id = Column(UUID(as_uuid=True), ForeignKey("cases.case_id"), nullable=True)
+    related_student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_students.student_id"), nullable=True)
+    related_case_id = Column(UUID(as_uuid=True), ForeignKey("b2b_cases.case_id"), nullable=True)
     is_reviewed = Column(Boolean, default=False, nullable=False)
-    reviewed_by = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=True)
+    reviewed_by = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     

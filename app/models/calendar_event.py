@@ -4,7 +4,8 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
 import enum
-from app.core.database import Base
+from app.models.base import Base
+
 
 class EventType(str, enum.Enum):
     SESSION = "SESSION"
@@ -13,6 +14,7 @@ class EventType(str, enum.Enum):
     ACTIVITY = "ACTIVITY"
     REMINDER = "REMINDER"
 
+
 class EventStatus(str, enum.Enum):
     REQUESTED = "REQUESTED"
     SCHEDULED = "SCHEDULED"
@@ -20,22 +22,23 @@ class EventStatus(str, enum.Enum):
     CANCELLED = "CANCELLED"
     RESCHEDULED = "RESCHEDULED"
 
+
 class CalendarEvent(Base):
-    __tablename__ = "calendar_events"
+    __tablename__ = "b2b_calendar_events"
     
     event_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    school_id = Column(UUID(as_uuid=True), ForeignKey("schools.school_id"), nullable=False)
+    school_id = Column(UUID(as_uuid=True), ForeignKey("b2b_schools.school_id"), nullable=False)
     title = Column(String(200), nullable=False)
     description = Column(Text, nullable=True)
     type = Column(SQLEnum(EventType), nullable=False)
     start_time = Column(DateTime, nullable=False)
     end_time = Column(DateTime, nullable=False)
     location = Column(String(200), nullable=True)
-    attendees = Column(ARRAY(UUID(as_uuid=True)), nullable=True)  # Array of user IDs
+    attendees = Column(ARRAY(UUID(as_uuid=True)), nullable=True)
     status = Column(SQLEnum(EventStatus), nullable=False, default=EventStatus.SCHEDULED)
-    related_case_id = Column(UUID(as_uuid=True), ForeignKey("cases.case_id"), nullable=True)
-    related_student_id = Column(UUID(as_uuid=True), ForeignKey("students.student_id"), nullable=True)
-    created_by = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False)
+    related_case_id = Column(UUID(as_uuid=True), ForeignKey("b2b_cases.case_id"), nullable=True)
+    related_student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_students.student_id"), nullable=True)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     

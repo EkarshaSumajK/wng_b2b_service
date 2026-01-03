@@ -4,11 +4,13 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
 import enum
-from app.core.database import Base
+from app.models.base import Base
+
 
 class AlertLevel(str, enum.Enum):
     HIGH = "HIGH"
     CRITICAL = "CRITICAL"
+
 
 class AlertType(str, enum.Enum):
     BEHAVIORAL = "BEHAVIORAL"
@@ -16,23 +18,25 @@ class AlertType(str, enum.Enum):
     EMOTIONAL = "EMOTIONAL"
     SOCIAL = "SOCIAL"
 
+
 class AlertStatus(str, enum.Enum):
     NEW = "NEW"
     IN_REVIEW = "IN_REVIEW"
     ESCALATED = "ESCALATED"
     RESOLVED = "RESOLVED"
 
+
 class RiskAlert(Base):
-    __tablename__ = "risk_alerts"
+    __tablename__ = "b2b_risk_alerts"
     
     alert_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("students.student_id"), nullable=False)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_students.student_id"), nullable=False)
     level = Column(SQLEnum(AlertLevel), nullable=False)
     type = Column(SQLEnum(AlertType), nullable=False)
     description = Column(Text, nullable=False)
     triggers = Column(ARRAY(String), nullable=True)
     recommendations = Column(ARRAY(String), nullable=True)
-    assigned_to = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=True)
+    assigned_to = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=True)
     status = Column(SQLEnum(AlertStatus), nullable=False, default=AlertStatus.NEW)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

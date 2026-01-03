@@ -4,7 +4,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
 import enum
-from app.core.database import Base
+from app.models.base import Base
 
 
 class WebinarCategory(str, enum.Enum):
@@ -44,48 +44,40 @@ class WebinarAudience(str, enum.Enum):
 
 
 class Webinar(Base):
-    __tablename__ = "webinars"
+    __tablename__ = "b2b_webinars"
     
     webinar_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     title = Column(String, nullable=False, index=True)
     description = Column(Text, nullable=True)
     
-    # Assignment - school/class targeting
-    school_id = Column(UUID(as_uuid=True), ForeignKey("schools.school_id"), nullable=True, index=True)
-    class_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=True)  # Specific classes (null = all classes in school)
+    school_id = Column(UUID(as_uuid=True), ForeignKey("b2b_schools.school_id"), nullable=True, index=True)
+    class_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=True)
     target_audience = Column(SQLEnum(WebinarAudience, values_callable=lambda x: [e.value for e in x]), nullable=True, default=WebinarAudience.STUDENTS)
-    target_grades = Column(ARRAY(String), nullable=True)  # e.g., ["8", "9", "10"]
+    target_grades = Column(ARRAY(String), nullable=True)
     
-    # Speaker information
     speaker_name = Column(String, nullable=False)
     speaker_title = Column(String, nullable=True)
     speaker_bio = Column(Text, nullable=True)
     speaker_image_url = Column(String, nullable=True)
     
-    # Scheduling
     date = Column(DateTime, nullable=False, index=True)
     duration_minutes = Column(Integer, nullable=False)
     
-    # Classification
     category = Column(SQLEnum(WebinarCategory), nullable=False, index=True)
     status = Column(SQLEnum(WebinarStatus), nullable=False, default=WebinarStatus.UPCOMING, index=True)
     level = Column(SQLEnum(WebinarLevel), nullable=False)
     
-    # Pricing
-    price = Column(Numeric(10, 2), nullable=False, default=0)  # 0 means free
+    price = Column(Numeric(10, 2), nullable=False, default=0)
     
-    # Content
-    topics = Column(JSON, nullable=True)  # Array of topic strings
+    topics = Column(JSON, nullable=True)
     video_url = Column(String, nullable=True)
     thumbnail_url = Column(String, nullable=True)
     
-    # Capacity and metrics
-    max_attendees = Column(Integer, nullable=True)  # Null = unlimited
+    max_attendees = Column(Integer, nullable=True)
     attendee_count = Column(Integer, default=0)
     views = Column(Integer, default=0)
     
-    # Metadata
-    created_by = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=True)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
@@ -108,16 +100,15 @@ class RegistrationStatus(str, enum.Enum):
 
 
 class WebinarSchoolRegistration(Base):
-    """Tracks school-level webinar registrations with class/grade targeting."""
-    __tablename__ = "webinar_school_registrations"
+    __tablename__ = "b2b_webinar_school_registrations"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    webinar_id = Column(UUID(as_uuid=True), ForeignKey("webinars.webinar_id"), nullable=False, index=True)
-    school_id = Column(UUID(as_uuid=True), ForeignKey("schools.school_id"), nullable=False, index=True)
+    webinar_id = Column(UUID(as_uuid=True), ForeignKey("b2b_webinars.webinar_id"), nullable=False, index=True)
+    school_id = Column(UUID(as_uuid=True), ForeignKey("b2b_schools.school_id"), nullable=False, index=True)
     registration_type = Column(SQLEnum(RegistrationType), nullable=False, default=RegistrationType.SCHOOL)
     class_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=True, default=[])
     grade_ids = Column(ARRAY(String), nullable=True, default=[])
-    registered_by = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=True)
+    registered_by = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=True)
     status = Column(SQLEnum(RegistrationStatus), nullable=False, default=RegistrationStatus.ACTIVE, index=True)
     total_students_invited = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -127,8 +118,3 @@ class WebinarSchoolRegistration(Base):
     webinar = relationship("Webinar", backref="school_registrations")
     school = relationship("School")
     registered_by_user = relationship("User")
-    
-    __table_args__ = (
-        # Unique constraint: one registration per school per webinar
-        {'sqlite_autoincrement': True},
-    )

@@ -1,5 +1,5 @@
 """
-Student engagement tracking models for counsellor analytics.
+Student engagement tracking models.
 Tracks app sessions, daily streaks, and webinar attendance.
 """
 from sqlalchemy import Column, String, Integer, Boolean, Date, ForeignKey, DateTime, UniqueConstraint
@@ -7,15 +7,15 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
-from app.core.database import Base
+from app.models.base import Base
 
 
 class StudentAppSession(Base):
     """Tracks individual app sessions for students."""
-    __tablename__ = "student_app_sessions"
+    __tablename__ = "b2b_student_app_sessions"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("students.student_id"), nullable=False, index=True)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_students.student_id"), nullable=False, index=True)
     session_start = Column(DateTime, nullable=False)
     session_end = Column(DateTime, nullable=True)
     duration_minutes = Column(Integer, nullable=True)
@@ -27,10 +27,10 @@ class StudentAppSession(Base):
 
 class StudentDailyStreak(Base):
     """Tracks daily activity for streak calculation."""
-    __tablename__ = "student_daily_streaks"
+    __tablename__ = "b2b_student_daily_streaks"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("students.student_id"), nullable=False, index=True)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_students.student_id"), nullable=False, index=True)
     date = Column(Date, nullable=False)
     app_opened = Column(Boolean, default=False)
     app_open_time = Column(DateTime, nullable=True)
@@ -39,7 +39,7 @@ class StudentDailyStreak(Base):
     streak_maintained = Column(Boolean, default=False)
     
     __table_args__ = (
-        UniqueConstraint('student_id', 'date', name='uq_student_daily_streak'),
+        UniqueConstraint('student_id', 'date', name='uq_b2b_student_daily_streak'),
     )
     
     # Relationships
@@ -48,9 +48,9 @@ class StudentDailyStreak(Base):
 
 class StudentStreakSummary(Base):
     """Denormalized streak summary for performance."""
-    __tablename__ = "student_streak_summary"
+    __tablename__ = "b2b_student_streak_summary"
     
-    student_id = Column(UUID(as_uuid=True), ForeignKey("students.student_id"), primary_key=True)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_students.student_id"), primary_key=True)
     current_streak = Column(Integer, default=0)
     max_streak = Column(Integer, default=0)
     streak_start_date = Column(Date, nullable=True)
@@ -63,12 +63,12 @@ class StudentStreakSummary(Base):
 
 
 class StudentWebinarAttendance(Base):
-    """Tracks student webinar attendance (separate from user registrations)."""
-    __tablename__ = "student_webinar_attendance"
+    """Tracks student webinar attendance."""
+    __tablename__ = "b2b_student_webinar_attendance"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    webinar_id = Column(UUID(as_uuid=True), ForeignKey("webinars.webinar_id"), nullable=False, index=True)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("students.student_id"), nullable=False, index=True)
+    webinar_id = Column(UUID(as_uuid=True), ForeignKey("b2b_webinars.webinar_id"), nullable=False, index=True)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_students.student_id"), nullable=False, index=True)
     attended = Column(Boolean, default=False)
     join_time = Column(DateTime, nullable=True)
     leave_time = Column(DateTime, nullable=True)
@@ -76,7 +76,7 @@ class StudentWebinarAttendance(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     __table_args__ = (
-        UniqueConstraint('webinar_id', 'student_id', name='uq_webinar_student_attendance'),
+        UniqueConstraint('webinar_id', 'student_id', name='uq_b2b_webinar_student_attendance'),
     )
     
     # Relationships

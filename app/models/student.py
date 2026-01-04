@@ -35,6 +35,9 @@ class Student(Base):
     last_name = Column(String, nullable=False)
     pseudonym = Column(String, nullable=True)
     roll_number = Column(String, nullable=True)
+    username = Column(String, nullable=True, unique=True, index=True)  # For student/parent login
+    email = Column(String, nullable=True)  # Student's email
+    password_hash = Column(String, nullable=True)  # For student/parent login
     dob = Column(Date, nullable=True)
     gender = Column(SQLEnum(Gender), nullable=True)
     class_id = Column(UUID(as_uuid=True), ForeignKey("b2b_classes.class_id"), nullable=True)

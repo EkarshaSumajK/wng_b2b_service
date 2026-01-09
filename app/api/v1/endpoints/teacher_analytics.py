@@ -1109,7 +1109,7 @@ async def get_teacher_activities(
     db: Session = Depends(get_db)
 ):
     """List of activities with completion stats for teacher's classes."""
-    from app.models.activity import Activity
+    from sqlalchemy import text
     
     start_date, end_date = get_date_range(days)
     class_ids = get_teacher_class_ids(db, teacher_id)
@@ -1122,34 +1122,45 @@ async def get_teacher_activities(
             raise HTTPException(status_code=403, detail="Access denied. Teacher is not assigned to this class.")
         class_ids = [class_id]
 
-    # Get activities with completion stats
-    query = db.query(
-        Activity.activity_id,
-        Activity.title,
-        Activity.type,
-        func.count(func.distinct(ActivitySubmission.student_id)).label('completed_count')
-    ).join(ActivityAssignment, Activity.activity_id == ActivityAssignment.activity_id
-    ).join(ActivitySubmission, and_(
-        ActivitySubmission.assignment_id == ActivityAssignment.assignment_id,
-        ActivitySubmission.status.in_([SubmissionStatus.SUBMITTED, SubmissionStatus.VERIFIED]),
-        ActivitySubmission.submitted_at >= datetime.combine(start_date, datetime.min.time())
-    )).filter(ActivityAssignment.class_id.in_(class_ids)
-    ).group_by(Activity.activity_id, Activity.title, Activity.type).all()
-    
     # Get total students
     student_count = db.query(func.count(Student.student_id)).filter(
         Student.class_id.in_(class_ids)
     ).scalar() or 1
     
+    # Query starting from assignments (same as monitoring page) with LEFT JOIN to activities
+    start_datetime = datetime.combine(start_date, datetime.min.time())
+    class_ids_str = ', '.join([f"'{str(cid)}'" for cid in class_ids])
+    
+    query = text(f"""
+        SELECT 
+            aa.activity_id,
+            COALESCE(a.title, 'Unknown Activity') as title,
+            COALESCE(a.activity_type, 'Activity') as type,
+            COUNT(DISTINCT CASE 
+                WHEN s.status IN ('SUBMITTED', 'VERIFIED') 
+                AND s.submitted_at >= :start_date 
+                THEN s.student_id 
+            END) as completed_count
+        FROM b2b_activity_assignments aa
+        LEFT JOIN activities a ON a.activity_id = aa.activity_id
+        LEFT JOIN b2b_activity_submissions s ON s.assignment_id = aa.assignment_id
+        WHERE aa.class_id IN ({class_ids_str})
+        AND aa.status = 'ACTIVE'
+        GROUP BY aa.activity_id, a.title, a.activity_type
+    """)
+    
+    result = db.execute(query, {"start_date": start_datetime})
+    
     results = []
-    for row in query:
+    for row in result:
+        completed = row.completed_count or 0
         results.append({
             "id": row.activity_id,
-            "title": row.title,
-            "type": row.type.value if row.type else "Activity",
-            "studentsCompleted": row.completed_count,
+            "title": row.title or 'Unknown Activity',
+            "type": row.type or 'Activity',
+            "studentsCompleted": completed,
             "totalStudentsAssigned": student_count,
-            "completionRate": round((row.completed_count / student_count) * 100, 1) if student_count > 0 else 0
+            "completionRate": round((completed / student_count) * 100, 1) if student_count > 0 else 0
         })
     
     return success_response({"activities": results})

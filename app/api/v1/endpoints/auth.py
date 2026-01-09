@@ -45,6 +45,24 @@ class UserInfo(BaseModel):
     school_id: str
 
 
+class UserProfileResponse(BaseModel):
+    """Full user profile with school information"""
+    user_id: str
+    email: str
+    display_name: str
+    role: str
+    phone: Optional[str] = None
+    profile_picture_url: Optional[str] = None
+    profile: Optional[dict] = None
+    availability: Optional[dict] = None
+    school_id: Optional[str] = None
+    school_name: Optional[str] = None
+    school_logo_url: Optional[str] = None
+    school_timezone: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
 class RefreshTokenRequest(BaseModel):
     refresh_token: str
 
@@ -214,6 +232,57 @@ async def get_current_user_info(
         "display_name": user.display_name,
         "role": user.role.value if user.role else "USER",
         "school_id": str(user.school_id) if user.school_id else None
+    }
+
+
+@router.get("/profile", response_model=UserProfileResponse)
+async def get_user_profile(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """
+    Get full user profile with school information.
+    
+    Returns comprehensive profile data including:
+    - Basic user info (email, display_name, role, phone)
+    - Profile picture URL
+    - Role-specific profile data (JSON)
+    - Availability schedule (JSON)
+    - School details (name, logo, timezone)
+    - Timestamps (created_at, updated_at)
+    """
+    from app.api.dependencies import get_current_user
+    from app.models.school import School
+    
+    logger.debug("Fetching full user profile")
+    
+    user = await get_current_user(token, db)
+    
+    # Get school info if user has a school_id
+    school = None
+    if user.school_id:
+        school = db.query(School).filter(School.school_id == user.school_id).first()
+    
+    logger.info(
+        f"Retrieved full profile for user: {user.email}",
+        extra={"extra_data": {"user_id": str(user.user_id)}}
+    )
+    
+    return {
+        "user_id": str(user.user_id),
+        "email": user.email,
+        "display_name": user.display_name,
+        "role": user.role.value if user.role else "USER",
+        "phone": user.phone,
+        "profile_picture_url": user.profile_picture_url,
+        "profile": user.profile,
+        "availability": user.availability,
+        "school_id": str(user.school_id) if user.school_id else None,
+        "school_name": school.name if school else None,
+        "school_logo_url": school.logo_url if school else None,
+        "school_timezone": school.timezone if school else None,
+        "created_at": user.created_at,
+        "updated_at": user.updated_at
     }
 
 

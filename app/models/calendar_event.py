@@ -37,7 +37,7 @@ class CalendarEvent(Base):
     attendees = Column(ARRAY(UUID(as_uuid=True)), nullable=True)
     status = Column(SQLEnum(EventStatus), nullable=False, default=EventStatus.SCHEDULED)
     related_case_id = Column(UUID(as_uuid=True), ForeignKey("b2b_cases.case_id"), nullable=True)
-    related_student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_students.student_id"), nullable=True)
+    related_student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=True)
     created_by = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -45,5 +45,5 @@ class CalendarEvent(Base):
     # Relationships
     school = relationship("School", back_populates="calendar_events")
     case = relationship("Case", back_populates="calendar_events")
-    student = relationship("Student", back_populates="calendar_events")
-    creator = relationship("User", back_populates="calendar_events_created")
+    student = relationship("User", foreign_keys=[related_student_id], back_populates="calendar_events")
+    creator = relationship("User", foreign_keys=[created_by], back_populates="calendar_events_created")

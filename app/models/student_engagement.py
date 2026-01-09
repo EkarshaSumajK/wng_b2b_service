@@ -15,14 +15,14 @@ class StudentAppSession(Base):
     __tablename__ = "b2b_student_app_sessions"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_students.student_id"), nullable=False, index=True)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=False, index=True)
     session_start = Column(DateTime, nullable=False)
     session_end = Column(DateTime, nullable=True)
     duration_minutes = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
-    student = relationship("Student")
+    student = relationship("User")
 
 
 class StudentDailyStreak(Base):
@@ -30,7 +30,7 @@ class StudentDailyStreak(Base):
     __tablename__ = "b2b_student_daily_streaks"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_students.student_id"), nullable=False, index=True)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=False, index=True)
     date = Column(Date, nullable=False)
     app_opened = Column(Boolean, default=False)
     app_open_time = Column(DateTime, nullable=True)
@@ -43,14 +43,14 @@ class StudentDailyStreak(Base):
     )
     
     # Relationships
-    student = relationship("Student")
+    student = relationship("User")
 
 
 class StudentStreakSummary(Base):
     """Denormalized streak summary for performance."""
     __tablename__ = "b2b_student_streak_summary"
     
-    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_students.student_id"), primary_key=True)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), primary_key=True)
     current_streak = Column(Integer, default=0)
     max_streak = Column(Integer, default=0)
     streak_start_date = Column(Date, nullable=True)
@@ -59,7 +59,7 @@ class StudentStreakSummary(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
-    student = relationship("Student")
+    student = relationship("User")
 
 
 class StudentWebinarAttendance(Base):
@@ -68,7 +68,7 @@ class StudentWebinarAttendance(Base):
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     webinar_id = Column(UUID(as_uuid=True), ForeignKey("b2b_webinars.webinar_id"), nullable=False, index=True)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_students.student_id"), nullable=False, index=True)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=False, index=True)
     attended = Column(Boolean, default=False)
     join_time = Column(DateTime, nullable=True)
     leave_time = Column(DateTime, nullable=True)
@@ -81,4 +81,4 @@ class StudentWebinarAttendance(Base):
     
     # Relationships
     webinar = relationship("Webinar", back_populates="student_attendance")
-    student = relationship("Student")
+    student = relationship("User")

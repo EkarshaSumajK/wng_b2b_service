@@ -30,7 +30,7 @@ class RiskAlert(Base):
     __tablename__ = "b2b_risk_alerts"
     
     alert_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_students.student_id"), nullable=False)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=False)
     level = Column(SQLEnum(AlertLevel), nullable=False)
     type = Column(SQLEnum(AlertType), nullable=False)
     description = Column(Text, nullable=False)
@@ -42,5 +42,5 @@ class RiskAlert(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
-    student = relationship("Student", back_populates="risk_alerts")
+    student = relationship("User", foreign_keys=[student_id], back_populates="risk_alerts")
     assigned_user = relationship("User", foreign_keys=[assigned_to], back_populates="risk_alerts_assigned")

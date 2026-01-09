@@ -16,7 +16,9 @@ class ActivityAssignment(Base):
     __tablename__ = "b2b_activity_assignments"
     
     assignment_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    activity_id = Column(UUID(as_uuid=True), ForeignKey("b2b_activities.activity_id"), nullable=False)
+    # Activity ID - FK constraint exists in database to activities.activity_id
+    # Not defined in SQLAlchemy model since activities table is in activity engine
+    activity_id = Column(String, nullable=False)
     class_id = Column(UUID(as_uuid=True), ForeignKey("b2b_classes.class_id"), nullable=False)
     assigned_by = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=False)
     due_date = Column(DateTime, nullable=True)
@@ -24,7 +26,6 @@ class ActivityAssignment(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
-    activity = relationship("Activity")
     class_obj = relationship("Class")
     assigner = relationship("User")
     submissions = relationship("ActivitySubmission", back_populates="assignment")

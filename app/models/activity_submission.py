@@ -25,7 +25,7 @@ class ActivitySubmission(Base):
     
     submission_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     assignment_id = Column(UUID(as_uuid=True), ForeignKey("b2b_activity_assignments.assignment_id"), nullable=False)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_students.student_id"), nullable=False)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=False)
     file_url = Column(String, nullable=True)
     file_type = Column(SQLEnum(FileType), nullable=True)
     status = Column(SQLEnum(SubmissionStatus), default=SubmissionStatus.PENDING)
@@ -36,7 +36,7 @@ class ActivitySubmission(Base):
     
     # Relationships
     assignment = relationship("ActivityAssignment", back_populates="submissions")
-    student = relationship("Student")
+    student = relationship("User")
     comments = relationship("SubmissionComment", back_populates="submission", cascade="all, delete-orphan")
 
 
@@ -46,11 +46,11 @@ class SubmissionComment(Base):
     comment_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     submission_id = Column(UUID(as_uuid=True), ForeignKey("b2b_activity_submissions.submission_id"), nullable=False)
     user_id = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=True)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_students.student_id"), nullable=True)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=True)
     message = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
     submission = relationship("ActivitySubmission", back_populates="comments")
-    user = relationship("User")
-    student = relationship("Student")
+    user = relationship("User", foreign_keys=[user_id])
+    student = relationship("User", foreign_keys=[student_id])

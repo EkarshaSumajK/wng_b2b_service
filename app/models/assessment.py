@@ -62,7 +62,7 @@ class StudentResponse(Base):
     
     response_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     assessment_id = Column(UUID(as_uuid=True), ForeignKey("b2b_assessments.assessment_id"), nullable=False)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_students.student_id"), nullable=False)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=False)
     question_id = Column(String(100), nullable=False)
     question_text = Column(Text, nullable=False)
     answer = Column(JSON, nullable=False)
@@ -72,4 +72,4 @@ class StudentResponse(Base):
     
     # Relationships
     assessment = relationship("Assessment", back_populates="responses")
-    student = relationship("Student")
+    student = relationship("User")

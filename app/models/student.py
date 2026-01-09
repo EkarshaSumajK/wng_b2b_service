@@ -55,10 +55,5 @@ class Student(Base):
     # Relationships
     school = relationship("School", back_populates="students")
     class_obj = relationship("Class", back_populates="students")
-    cases = relationship("Case", back_populates="student")
-    observations = relationship("Observation", back_populates="student")
-    risk_alerts = relationship("RiskAlert", back_populates="student")
-    ai_recommendations = relationship("AIRecommendation", back_populates="student")
-    consent_records = relationship("ConsentRecord", back_populates="student")
-    calendar_events = relationship("CalendarEvent", back_populates="student")
-    therapist_bookings = relationship("TherapistBooking", back_populates="student")
+    # Note: cases, observations, risk_alerts, ai_recommendations, consent_records, 
+    # calendar_events, and therapist_bookings relationships have been migrated to User model

@@ -38,7 +38,7 @@ class Case(Base):
     __tablename__ = "b2b_cases"
     
     case_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_students.student_id"), nullable=False)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=False)
     created_by = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=False)
     status = Column(SQLEnum(CaseStatus), nullable=False, default=CaseStatus.INTAKE)
     risk_level = Column(SQLEnum(RiskLevel), nullable=False, default=RiskLevel.LOW)
@@ -50,7 +50,7 @@ class Case(Base):
     closed_at = Column(DateTime, nullable=True)
     
     # Relationships
-    student = relationship("Student", back_populates="cases")
+    student = relationship("User", foreign_keys=[student_id], back_populates="cases")
     creator = relationship("User", foreign_keys=[created_by], back_populates="cases_created")
     journal_entries = relationship("JournalEntry", back_populates="case")
     session_notes = relationship("SessionNote", back_populates="case")

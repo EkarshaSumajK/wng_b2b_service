@@ -20,7 +20,7 @@ class TherapistBooking(Base):
     booking_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     therapist_id = Column(UUID(as_uuid=True), ForeignKey("b2b_therapists.therapist_id", ondelete="CASCADE"), nullable=False, index=True)
     user_id = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id", ondelete="CASCADE"), nullable=False, index=True)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_students.student_id", ondelete="SET NULL"), nullable=True, index=True)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id", ondelete="SET NULL"), nullable=True, index=True)
     school_id = Column(UUID(as_uuid=True), ForeignKey("b2b_schools.school_id", ondelete="CASCADE"), nullable=False, index=True)
     
     appointment_date = Column(Date, nullable=False, index=True)
@@ -40,6 +40,6 @@ class TherapistBooking(Base):
     
     # Relationships
     therapist = relationship("Therapist", back_populates="bookings")
-    user = relationship("User", back_populates="therapist_bookings")
-    student = relationship("Student", back_populates="therapist_bookings")
+    user = relationship("User", foreign_keys=[user_id], back_populates="therapist_bookings")
+    student = relationship("User", foreign_keys=[student_id], back_populates="therapist_bookings_as_student")
     school = relationship("School")

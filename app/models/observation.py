@@ -18,7 +18,7 @@ class Observation(Base):
     __tablename__ = "b2b_observations"
     
     observation_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_students.student_id"), nullable=False)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=False)
     reported_by = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=False)
     severity = Column(SQLEnum(Severity), nullable=False)
     category = Column(String, nullable=True)
@@ -29,5 +29,5 @@ class Observation(Base):
     timestamp = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
-    student = relationship("Student", back_populates="observations")
+    student = relationship("User", foreign_keys=[student_id], back_populates="observations")
     reporter = relationship("User", foreign_keys=[reported_by], back_populates="observations_reported")

@@ -13,6 +13,7 @@ from app.models.assessment import Assessment, AssessmentTemplate, StudentRespons
 from app.models.activity_assignment import ActivityAssignment, AssignmentStatus
 from app.models.activity_submission import ActivitySubmission, SubmissionStatus
 from app.models.activity import Activity
+from app.models.activity_engine import ActivityEngine
 from app.models.student import Student
 from app.models.class_model import Class
 
@@ -357,7 +358,7 @@ async def get_activity_analytics(
     - Class-level breakdown
     - Time-based analysis
     """
-    activity = db.query(Activity).filter(Activity.activity_id == activity_id).first()
+    activity = db.query(ActivityEngine).filter(ActivityEngine.activity_id == str(activity_id)).first()
     if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
     
@@ -374,19 +375,19 @@ async def get_activity_analytics(
         "activity_id": str(activity_id),
         "activity_name": activity.title,
         "description": activity.description,
-        "type": activity.type.value if activity.type else None,
-        "duration": activity.duration,
-        "target_grades": activity.target_grades,
-        "themes": activity.theme,
-        "diagnosis": activity.diagnosis,
-        "objectives": activity.objectives,
-        "materials": activity.materials,
-        "instructions": activity.instructions,
-        "location": activity.location.value if activity.location else None,
-        "risk_level": activity.risk_level.value if activity.risk_level else None,
-        "skill_level": activity.skill_level.value if activity.skill_level else None,
-        "thumbnail_url": activity.thumbnail_url,
-        "is_counselor_only": activity.is_counselor_only
+        "type": activity.activity_type,
+        "duration": None,
+        "target_grades": None,
+        "themes": None,
+        "diagnosis": None,
+        "objectives": None,
+        "materials": None,
+        "instructions": None,
+        "location": None,
+        "risk_level": None,
+        "skill_level": None,
+        "thumbnail_url": None,
+        "is_counselor_only": False
     }
     
     if not assignments:
@@ -484,7 +485,7 @@ async def get_student_activity_analytics(
     query = (
         db.query(ActivitySubmission)
         .options(
-            joinedload(ActivitySubmission.assignment).joinedload(ActivityAssignment.activity)
+            joinedload(ActivitySubmission.assignment)
         )
         .filter(ActivitySubmission.student_id == student_id)
     )
@@ -502,6 +503,13 @@ async def get_student_activity_analytics(
     
     submissions = query.all()
     
+    # Batch fetch activities
+    activity_ids = [sub.assignment.activity_id for sub in submissions if sub.assignment]
+    activities_map = {}
+    if activity_ids:
+        activities_data = db.query(ActivityEngine).filter(ActivityEngine.activity_id.in_(activity_ids)).all()
+        activities_map = {str(a.activity_id): a for a in activities_data}
+    
     # Status breakdown
     status_counts = {"PENDING": 0, "SUBMITTED": 0, "VERIFIED": 0, "REJECTED": 0}
     activity_types = {}
@@ -511,15 +519,10 @@ async def get_student_activity_analytics(
     for sub in submissions:
         status_counts[sub.status.value] = status_counts.get(sub.status.value, 0) + 1
         
-        activity = sub.assignment.activity if sub.assignment else None
+        activity = activities_map.get(str(sub.assignment.activity_id)) if sub.assignment else None
         if activity:
-            act_type = activity.type.value if activity.type else "UNKNOWN"
+            act_type = activity.activity_type or "UNKNOWN"
             activity_types[act_type] = activity_types.get(act_type, 0) + 1
-            
-            # Track themes
-            if activity.theme:
-                for theme in activity.theme:
-                    themes_count[theme] = themes_count.get(theme, 0) + 1
             
             submission_details.append({
                 "submission_id": sub.submission_id,
@@ -528,14 +531,14 @@ async def get_student_activity_analytics(
                     "activity_name": activity.title,
                     "description": activity.description,
                     "type": act_type,
-                    "duration": activity.duration,
-                    "themes": activity.theme,
-                    "diagnosis": activity.diagnosis,
-                    "objectives": activity.objectives,
-                    "location": activity.location.value if activity.location else None,
-                    "risk_level": activity.risk_level.value if activity.risk_level else None,
-                    "skill_level": activity.skill_level.value if activity.skill_level else None,
-                    "thumbnail_url": activity.thumbnail_url
+                    "duration": None,
+                    "themes": None,
+                    "diagnosis": None,
+                    "objectives": None,
+                    "location": None,
+                    "risk_level": None,
+                    "skill_level": None,
+                    "thumbnail_url": None
                 },
                 "status": sub.status.value,
                 "submitted_at": sub.submitted_at,

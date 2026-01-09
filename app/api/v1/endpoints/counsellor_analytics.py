@@ -25,6 +25,7 @@ from app.models.assessment import Assessment, AssessmentTemplate, StudentRespons
 from app.models.activity_assignment import ActivityAssignment
 from app.models.activity_submission import ActivitySubmission, SubmissionStatus
 from app.models.activity import Activity
+from app.models.activity_engine import ActivityEngine
 from app.models.webinar import Webinar, WebinarSchoolRegistration
 from app.models.student_engagement import (
     StudentAppSession, StudentDailyStreak, 
@@ -703,7 +704,7 @@ async def get_student_activity_history(
     
     # Filtered query
     query = db.query(ActivitySubmission).options(
-        joinedload(ActivitySubmission.assignment).joinedload(ActivityAssignment.activity)
+        joinedload(ActivitySubmission.assignment)
     ).filter(ActivitySubmission.student_id == student_id)
     
     if status:
@@ -717,18 +718,28 @@ async def get_student_activity_history(
     
     submissions = query.order_by(ActivitySubmission.created_at.desc()).all()
     
-    activities = [{
-        "submission_id": sub.submission_id,
-        "activity_id": sub.assignment.activity.activity_id if sub.assignment and sub.assignment.activity else None,
-        "activity_title": sub.assignment.activity.title if sub.assignment and sub.assignment.activity else None,
-        "activity_type": sub.assignment.activity.type.value if sub.assignment and sub.assignment.activity and sub.assignment.activity.type else None,
-        "assigned_at": sub.assignment.created_at if sub.assignment else None,
-        "due_date": sub.assignment.due_date if sub.assignment else None,
-        "submitted_at": sub.submitted_at,
-        "status": sub.status.value,
-        "feedback": sub.feedback,
-        "file_url": sub.file_url
-    } for sub in submissions]
+    # Batch fetch activities
+    activity_ids = [sub.assignment.activity_id for sub in submissions if sub.assignment]
+    activities_map = {}
+    if activity_ids:
+        activities_data = db.query(ActivityEngine).filter(ActivityEngine.activity_id.in_(activity_ids)).all()
+        activities_map = {str(a.activity_id): a for a in activities_data}
+    
+    activities = []
+    for sub in submissions:
+        activity = activities_map.get(str(sub.assignment.activity_id)) if sub.assignment else None
+        activities.append({
+            "submission_id": sub.submission_id,
+            "activity_id": activity.activity_id if activity else (sub.assignment.activity_id if sub.assignment else None),
+            "activity_title": activity.title if activity else None,
+            "activity_type": activity.activity_type if activity and activity.activity_type else None,
+            "assigned_at": sub.assignment.created_at if sub.assignment else None,
+            "due_date": sub.assignment.due_date if sub.assignment else None,
+            "submitted_at": sub.submitted_at,
+            "status": sub.status.value,
+            "feedback": sub.feedback,
+            "file_url": sub.file_url
+        })
     
     return success_response({
         "student_id": student_id,
@@ -1047,52 +1058,64 @@ async def get_school_activities(
     days: int = Query(30),
     db: Session = Depends(get_db)
 ):
-    """List of activities with completion stats."""
+    """List of activities with completion stats - shows assigned activities from activity engine."""
+    from sqlalchemy import text
+    
     start_date, end_date = get_date_range(days)
+    start_datetime = datetime.combine(start_date, datetime.min.time())
     
-    from app.models.activity import Activity
-    
-    # Base query for activity completion
-    query = db.query(
-        Activity.activity_id,
-        Activity.title,
-        Activity.type,
-        func.count(func.distinct(ActivitySubmission.student_id)).label('completed_count')
-    ).join(ActivityAssignment, Activity.activity_id == ActivityAssignment.activity_id
-    ).join(ActivitySubmission, and_(
-        ActivitySubmission.assignment_id == ActivityAssignment.assignment_id,
-        ActivitySubmission.status.in_([SubmissionStatus.SUBMITTED, SubmissionStatus.VERIFIED]),
-        ActivitySubmission.submitted_at >= datetime.combine(start_date, datetime.min.time())
-    )).join(Class, ActivityAssignment.class_id == Class.class_id)
-
+    # Get class IDs based on filters
     if class_id:
-        query = query.filter(Class.class_id == class_id)
+        class_ids = [class_id]
     elif teacher_id:
-        query = query.filter(Class.teacher_id == teacher_id)
+        class_ids = [c.class_id for c in db.query(Class.class_id).filter(Class.teacher_id == teacher_id).all()]
     else:
-        query = query.filter(Class.school_id == school_id)
-
-    results = query.group_by(Activity.activity_id, Activity.title, Activity.type).all()
+        class_ids = [c.class_id for c in db.query(Class.class_id).filter(Class.school_id == school_id).all()]
     
-    # Get total students assigned
+    if not class_ids:
+        return success_response({"activities": []})
+    
+    # Get total students
     if class_id:
-        student_count_query = db.query(func.count(Student.student_id)).filter(Student.class_id == class_id)
+        student_count = db.query(func.count(Student.student_id)).filter(Student.class_id == class_id).scalar() or 1
     elif teacher_id:
-        student_count_query = db.query(func.count(Student.student_id)).join(Class, Student.class_id == Class.class_id).filter(Class.teacher_id == teacher_id)
+        student_count = db.query(func.count(Student.student_id)).join(Class, Student.class_id == Class.class_id).filter(Class.teacher_id == teacher_id).scalar() or 1
     else:
-        student_count_query = db.query(func.count(Student.student_id)).filter(Student.school_id == school_id)
+        student_count = db.query(func.count(Student.student_id)).filter(Student.school_id == school_id).scalar() or 1
     
-    assigned_student_count = student_count_query.scalar() or 1
+    # Query from assignments with LEFT JOIN to activities table (activity engine)
+    class_ids_str = ', '.join([f"'{str(cid)}'" for cid in class_ids])
+    
+    query = text(f"""
+        SELECT 
+            aa.activity_id,
+            COALESCE(a.title, 'Unknown Activity') as title,
+            COALESCE(a.activity_type, 'Activity') as type,
+            COUNT(DISTINCT CASE 
+                WHEN s.status IN ('SUBMITTED', 'VERIFIED') 
+                AND s.submitted_at >= :start_date 
+                THEN s.student_id 
+            END) as completed_count
+        FROM b2b_activity_assignments aa
+        LEFT JOIN activities a ON a.activity_id = aa.activity_id
+        LEFT JOIN b2b_activity_submissions s ON s.assignment_id = aa.assignment_id
+        WHERE aa.class_id IN ({class_ids_str})
+        AND aa.status = 'ACTIVE'
+        GROUP BY aa.activity_id, a.title, a.activity_type
+    """)
+    
+    result = db.execute(query, {"start_date": start_datetime})
     
     data = []
-    for row in results:
+    for row in result:
+        completed = row.completed_count or 0
         data.append({
             "id": row.activity_id,
-            "title": row.title,
-            "type": row.type.value if row.type else "Activity",
-            "studentsCompleted": row.completed_count,
-            "totalStudentsAssigned": assigned_student_count,
-            "completionRate": (row.completed_count / assigned_student_count) * 100 if assigned_student_count > 0 else 0
+            "title": row.title or 'Unknown Activity',
+            "type": row.type or 'Activity',
+            "studentsCompleted": completed,
+            "totalStudentsAssigned": student_count,
+            "completionRate": round((completed / student_count) * 100, 1) if student_count > 0 else 0
         })
     
     return success_response({"activities": data})
@@ -1108,8 +1131,6 @@ async def get_school_webinars(
     db: Session = Depends(get_db)
 ):
     """List of webinars with attendance stats."""
-    start_date, end_date = get_date_range(days)
-    start_datetime = datetime.combine(start_date, datetime.min.time())
     
     # Get webinars registered for this school
     registrations = db.query(WebinarSchoolRegistration).filter(
@@ -1119,11 +1140,10 @@ async def get_school_webinars(
     if not registrations:
         return success_response({"webinars": []})
     
-    # Get the actual webinar details
+    # Get the actual webinar details (no date filter - show all registered webinars)
     webinar_ids = [reg.webinar_id for reg in registrations]
     webinars = db.query(Webinar).filter(
-        Webinar.webinar_id.in_(webinar_ids),
-        Webinar.date >= start_datetime
+        Webinar.webinar_id.in_(webinar_ids)
     ).order_by(Webinar.date.desc()).all()
     
     if not webinars:
@@ -1665,27 +1685,37 @@ async def get_student_profile(
     assessments_list.sort(key=lambda x: x["submittedAt"] or datetime.min, reverse=True)
     
     # 4. Activity History
-    activity_submissions = db.query(ActivitySubmission).join(ActivityAssignment).join(Activity).filter(
+    activity_submissions = db.query(ActivitySubmission).join(ActivityAssignment).filter(
         ActivitySubmission.student_id == student_id
     ).options(
-        joinedload(ActivitySubmission.assignment).joinedload(ActivityAssignment.activity)
+        joinedload(ActivitySubmission.assignment)
     ).all()
     
     print(f"DEBUG: Fetched {len(activity_submissions)} activity submissions for student {student_id}")
 
+    # Collect activity IDs to batch fetch
+    activity_ids = [sub.assignment.activity_id for sub in activity_submissions if sub.assignment]
+    activities_map = {}
+    if activity_ids:
+        activities = db.query(ActivityEngine).filter(ActivityEngine.activity_id.in_(activity_ids)).all()
+        activities_map = {str(a.activity_id): a for a in activities}
+
     activities_list = []
     for sub in activity_submissions:
-        # Check if assignment/activity exists (safe navigation)
-        if sub.assignment and sub.assignment.activity:
-             activities_list.append({
-                 "id": str(sub.submission_id),
-                 "title": sub.assignment.activity.title,
-                 "type": sub.assignment.activity.type, 
-                 "submittedAt": sub.submitted_at.isoformat() if sub.submitted_at else sub.created_at.isoformat(),
-                 "status": sub.status,
-                 "feedback": sub.feedback,
-                 "fileUrl": sub.file_url 
-             })
+        if sub.assignment:
+            activity = activities_map.get(str(sub.assignment.activity_id))
+            activity_title = activity.title if activity else f"Activity {sub.assignment.activity_id}"
+            activity_type = (activity.activity_type if activity else "activity") or "activity"
+            
+            activities_list.append({
+                "id": str(sub.submission_id),
+                "title": activity_title,
+                "type": activity_type, 
+                "submittedAt": sub.submitted_at.isoformat() if sub.submitted_at else sub.created_at.isoformat(),
+                "status": sub.status,
+                "feedback": sub.feedback,
+                "fileUrl": sub.file_url 
+            })
     
     # 5. Webinar History
     webinar_attendance = db.query(StudentWebinarAttendance).join(Webinar).filter(
@@ -1871,10 +1901,10 @@ async def get_activity_details(
     db: Session = Depends(get_db)
 ):
     """Detailed view of a specific activity."""
-    from app.models.activity import Activity # Import here
+    from app.models.activity_engine import ActivityEngine
     start_date, end_date = get_date_range(days)
 
-    activity = db.query(Activity).filter(Activity.activity_id == activity_id).first()
+    activity = db.query(ActivityEngine).filter(ActivityEngine.activity_id == str(activity_id)).first()
     if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
         
@@ -1920,7 +1950,7 @@ async def get_activity_details(
     return success_response({
         "id": activity_id,
         "title": activity.title,
-        "type": activity.type.value if activity.type else "Activity",
+        "type": activity.activity_type or "Activity",
         "totalStudentsAssigned": len(students),
         "studentsCompleted": completed_count,
         "studentsPending": len(students) - completed_count,

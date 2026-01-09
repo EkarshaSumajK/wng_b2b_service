@@ -18,6 +18,7 @@ from app.models.user import User
 from app.models.assessment import StudentResponse
 from app.models.activity_submission import ActivitySubmission, SubmissionStatus
 from app.models.activity_assignment import ActivityAssignment
+from app.models.activity_engine import ActivityEngine
 from app.models.student_engagement import (
     StudentAppSession, StudentStreakSummary, StudentWebinarAttendance
 )
@@ -620,7 +621,7 @@ async def get_student_activity_history(
     
     # Filtered query
     query = db.query(ActivitySubmission).options(
-        joinedload(ActivitySubmission.assignment).joinedload(ActivityAssignment.activity)
+        joinedload(ActivitySubmission.assignment)
     ).filter(ActivitySubmission.student_id == student_id)
     
     if status:
@@ -634,18 +635,28 @@ async def get_student_activity_history(
     
     submissions = query.order_by(ActivitySubmission.created_at.desc()).all()
     
-    activities = [{
-        "submission_id": sub.submission_id,
-        "activity_id": sub.assignment.activity.activity_id if sub.assignment and sub.assignment.activity else None,
-        "activity_title": sub.assignment.activity.title if sub.assignment and sub.assignment.activity else None,
-        "activity_type": sub.assignment.activity.type.value if sub.assignment and sub.assignment.activity and sub.assignment.activity.type else None,
-        "assigned_at": sub.assignment.created_at if sub.assignment else None,
-        "due_date": sub.assignment.due_date if sub.assignment else None,
-        "submitted_at": sub.submitted_at,
-        "status": sub.status.value,
-        "feedback": sub.feedback,
-        "file_url": sub.file_url
-    } for sub in submissions]
+    # Batch fetch activities
+    activity_ids = [sub.assignment.activity_id for sub in submissions if sub.assignment]
+    activities_map = {}
+    if activity_ids:
+        activities_data = db.query(ActivityEngine).filter(ActivityEngine.activity_id.in_(activity_ids)).all()
+        activities_map = {str(a.activity_id): a for a in activities_data}
+    
+    activities = []
+    for sub in submissions:
+        activity = activities_map.get(str(sub.assignment.activity_id)) if sub.assignment else None
+        activities.append({
+            "submission_id": sub.submission_id,
+            "activity_id": activity.activity_id if activity else (sub.assignment.activity_id if sub.assignment else None),
+            "activity_title": activity.title if activity else None,
+            "activity_type": activity.activity_type if activity else None,
+            "assigned_at": sub.assignment.created_at if sub.assignment else None,
+            "due_date": sub.assignment.due_date if sub.assignment else None,
+            "submitted_at": sub.submitted_at,
+            "status": sub.status.value,
+            "feedback": sub.feedback,
+            "file_url": sub.file_url
+        })
     
     return success_response({
         "student_id": student_id,
@@ -1206,8 +1217,7 @@ async def get_teacher_webinars(
 
     webinar_ids = [reg.webinar_id for reg in registrations]
     webinars = db.query(Webinar).filter(
-        Webinar.webinar_id.in_(webinar_ids),
-        Webinar.date >= start_datetime
+        Webinar.webinar_id.in_(webinar_ids)
     ).order_by(Webinar.date.desc()).all()
     
     if not webinars:
@@ -1358,13 +1368,12 @@ async def get_teacher_activity_details(
     db: Session = Depends(get_db)
 ):
     """Detailed view of a specific activity for teacher's classes."""
-    from app.models.activity import Activity
     
     class_ids = get_teacher_class_ids(db, teacher_id)
     if not class_ids:
         raise HTTPException(status_code=403, detail="Teacher has no assigned classes")
     
-    activity = db.query(Activity).filter(Activity.activity_id == activity_id).first()
+    activity = db.query(ActivityEngine).filter(ActivityEngine.activity_id == str(activity_id)).first()
     if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
     
@@ -1407,7 +1416,7 @@ async def get_teacher_activity_details(
     return success_response({
         "id": activity_id,
         "title": activity.title,
-        "type": activity.type.value if activity.type else "Activity",
+        "type": activity.activity_type or "Activity",
         "totalStudentsAssigned": len(students),
         "studentsCompleted": completed_count,
         "studentsPending": len(students) - completed_count,

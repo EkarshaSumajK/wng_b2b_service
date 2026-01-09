@@ -35,13 +35,29 @@ async def get_webinars_analytics(
     limit: int = 20,
     db: Session = Depends(get_db)
 ):
-    """Get all webinars with attendance analytics."""
+    """Get webinars with attendance analytics - only shows webinars registered by the school."""
     start_date = datetime.utcnow() - timedelta(days=days)
     
-    query = db.query(Webinar)
-    
+    # If school_id provided, only show webinars the school has registered for
     if school_id:
-        query = query.filter(or_(Webinar.school_id == school_id, Webinar.school_id.is_(None)))
+        # Get webinar IDs that this school has registered for
+        registered_webinar_ids = db.query(WebinarSchoolRegistration.webinar_id).filter(
+            WebinarSchoolRegistration.school_id == school_id
+        ).all()
+        registered_ids = [r.webinar_id for r in registered_webinar_ids]
+        
+        if not registered_ids:
+            return success_response({
+                "total": 0,
+                "skip": skip,
+                "limit": limit,
+                "webinars": []
+            })
+        
+        query = db.query(Webinar).filter(Webinar.webinar_id.in_(registered_ids))
+    else:
+        # No school filter - show all webinars (admin view)
+        query = db.query(Webinar)
     
     if status:
         try:

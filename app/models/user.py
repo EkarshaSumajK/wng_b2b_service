@@ -1,5 +1,5 @@
 from sqlalchemy import Column, String, JSON, ForeignKey, DateTime, Enum as SQLEnum
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
@@ -29,7 +29,7 @@ class User(Base):
     display_name = Column(String, nullable=False)
     phone = Column(String, nullable=True)
     profile_picture_url = Column(String, nullable=True)
-    profile = Column(JSON, nullable=True)
+    profile = Column(JSONB, nullable=True)  # Changed to JSONB for PostgreSQL JSON operators
     availability = Column(JSON, nullable=True)
     auth_provider = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

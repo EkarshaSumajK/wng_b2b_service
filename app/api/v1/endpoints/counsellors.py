@@ -166,7 +166,6 @@ async def get_counsellor_dashboard(
         raise HTTPException(status_code=404, detail="Counsellor not found")
 
     from app.models.case import CaseStatus, RiskLevel
-    from app.models.student import Student
     from app.models.assessment import Assessment, StudentResponse, AssessmentTemplate
     from datetime import datetime, timedelta
 
@@ -250,11 +249,14 @@ async def get_counsellor_dashboard(
             "max_score": round(max(data["scores"]), 2) if data["scores"] else 0
         })
     
-    # Pre-load all students at once
+    # Pre-load all students at once (from b2b_users with role=STUDENT)
     students_map = {}
     if student_ids:
-        students_list = db.query(Student).filter(Student.student_id.in_(student_ids)).all()
-        students_map = {s.student_id: s for s in students_list}
+        students_list = db.query(User).filter(
+            User.user_id.in_(student_ids),
+            User.role == UserRole.STUDENT
+        ).all()
+        students_map = {s.user_id: s for s in students_list}
     
     # Students with concerning assessment scores (below average by 20%)
     concern_threshold = avg_assessment_score * 0.8 if avg_assessment_score > 0 else 0
@@ -268,7 +270,7 @@ async def get_counsellor_dashboard(
             
             students_at_risk_by_assessment.append({
                 "student_id": str(student_id),
-                "student_name": f"{student.first_name} {student.last_name}" if student else "Unknown",
+                "student_name": student.display_name if student else "Unknown",
                 "average_score": round(avg_student_score, 2),
                 "assessments_completed": data["count"],
                 "has_active_case": case is not None and case.status != CaseStatus.CLOSED,
@@ -290,7 +292,7 @@ async def get_counsellor_dashboard(
             
             students_assessment_details.append({
                 "student_id": str(case.student_id),
-                "student_name": f"{student.first_name} {student.last_name}",
+                "student_name": student.display_name,
                 "case_status": case.status.value,
                 "risk_level": case.risk_level.value,
                 "assessments_completed": assessments_count,
@@ -350,10 +352,13 @@ async def get_counsellor_dashboard(
     if next_session:
         student_name = next_session.title # Default fallback
         if next_session.related_student_id:
-             # Try to fetch student name if linked
-             student = db.query(Student).filter(Student.student_id == next_session.related_student_id).first()
+             # Try to fetch student name if linked (from b2b_users)
+             student = db.query(User).filter(
+                 User.user_id == next_session.related_student_id,
+                 User.role == UserRole.STUDENT
+             ).first()
              if student:
-                 student_name = f"{student.first_name} {student.last_name}"
+                 student_name = student.display_name
         
         next_session_data = {
             "title": next_session.title,

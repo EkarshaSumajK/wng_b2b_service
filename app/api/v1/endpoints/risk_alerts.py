@@ -6,9 +6,9 @@ from uuid import UUID
 from app.api.dependencies import get_db
 from app.core.response import success_response
 from app.core.logging_config import get_logger
+from app.core.student_helpers import get_student_ids_by_school, get_student_name
 from app.models.risk_alert import RiskAlert, AlertStatus, AlertLevel
-from app.models.student import Student
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.schemas.risk_alert import RiskAlert as RiskAlertSchema, RiskAlertCreate, RiskAlertUpdate
 
 # Initialize logger
@@ -37,7 +37,7 @@ def get_risk_alerts(
     
     # Filter by school if provided
     if school_id:
-        student_ids = [s.student_id for s in db.query(Student.student_id).filter(Student.school_id == school_id).all()]
+        student_ids = get_student_ids_by_school(db, school_id)
         query = query.filter(RiskAlert.student_id.in_(student_ids))
     
     if student_id:
@@ -55,10 +55,15 @@ def get_risk_alerts(
     # Build response using eager-loaded relationships
     result = []
     for alert in alerts:
+        # Get student name from User model
+        student_name = "Unknown"
+        if alert.student:
+            student_name = alert.student.display_name or "Unknown"
+        
         result.append({
             "id": str(alert.alert_id),
             "studentId": str(alert.student_id),
-            "studentName": f"{alert.student.first_name} {alert.student.last_name}" if alert.student else "Unknown",
+            "studentName": student_name,
             "level": alert.level.value.lower(),
             "type": alert.type.value.lower(),
             "description": alert.description,

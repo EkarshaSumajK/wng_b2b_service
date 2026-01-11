@@ -14,8 +14,9 @@ from app.models.activity_assignment import ActivityAssignment, AssignmentStatus
 from app.models.activity_submission import ActivitySubmission, SubmissionStatus
 from app.models.activity import Activity
 from app.models.activity_engine import ActivityEngine
-from app.models.student import Student
 from app.models.class_model import Class
+from app.models.user import User, UserRole
+from app.core.student_helpers import get_student_by_id, get_students_by_school, get_student_ids_by_school
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -142,11 +143,11 @@ async def get_assessment_analytics(
     # Get student details
     student_results = []
     for student_id, data in student_scores.items():
-        student = db.query(Student).filter(Student.student_id == student_id).first()
+        student = get_student_by_id(db, student_id)
         if student:
             student_results.append({
                 "student_id": student_id,
-                "student_name": f"{student.first_name} {student.last_name}",
+                "student_name": student.display_name,
                 "total_score": round(data["total"], 2),
                 "completed_at": data["responses"][0].completed_at if data["responses"] else None
             })
@@ -157,7 +158,11 @@ async def get_assessment_analytics(
     # Completion metrics
     total_expected = 0
     if assessment.class_id:
-        total_expected = db.query(Student).filter(Student.class_id == assessment.class_id).count()
+        # Count students in class from b2b_users with role=STUDENT
+        total_expected = db.query(User).filter(
+            User.role == UserRole.STUDENT,
+            User.profile['class_id'].astext == str(assessment.class_id)
+        ).count()
     
     return success_response({
         "assessment_id": assessment_id,
@@ -200,7 +205,7 @@ async def get_student_assessment_analytics(
     - Comparison to class/school averages
     - Individual assessment details
     """
-    student = db.query(Student).filter(Student.student_id == student_id).first()
+    student = get_student_by_id(db, student_id)
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     
@@ -284,11 +289,13 @@ async def get_student_assessment_analytics(
     
     # Compare to class average (if student has a class)
     class_comparison = None
-    if student.class_id:
-        # Get all students in the same class
-        classmates = db.query(Student.student_id).filter(
-            Student.class_id == student.class_id,
-            Student.student_id != student_id
+    student_class_id = student.profile.get("class_id") if student.profile else None
+    if student_class_id:
+        # Get all students in the same class from b2b_users
+        classmates = db.query(User.user_id).filter(
+            User.role == UserRole.STUDENT,
+            User.profile['class_id'].astext == student_class_id,
+            User.user_id != student_id
         ).all()
         classmate_ids = [c[0] for c in classmates]
         
@@ -320,8 +327,8 @@ async def get_student_assessment_analytics(
     
     return success_response({
         "student_id": student_id,
-        "student_name": f"{student.first_name} {student.last_name}",
-        "class_id": student.class_id,
+        "student_name": student.display_name,
+        "class_id": student.profile.get("class_id") if student.profile else None,
         "total_assessments": len(assessment_data),
         "overall_statistics": overall_stats,
         "category_breakdown": category_breakdown,
@@ -477,7 +484,7 @@ async def get_student_activity_analytics(
     - Recent submissions with full activity details
     - Performance over time
     """
-    student = db.query(Student).filter(Student.student_id == student_id).first()
+    student = get_student_by_id(db, student_id)
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     
@@ -575,8 +582,8 @@ async def get_student_activity_analytics(
     
     return success_response({
         "student_id": student_id,
-        "student_name": f"{student.first_name} {student.last_name}",
-        "class_id": student.class_id,
+        "student_name": student.display_name,
+        "class_id": student.profile.get("class_id") if student.profile else None,
         "overall_metrics": {
             "total_assigned": total,
             "total_completed": completed,
@@ -607,7 +614,7 @@ async def get_student_summary_analytics(
     Get a combined summary of both assessment and activity analytics for a student.
     Useful for dashboard views.
     """
-    student = db.query(Student).filter(Student.student_id == student_id).first()
+    student = get_student_by_id(db, student_id)
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     
@@ -644,10 +651,10 @@ async def get_student_summary_analytics(
     
     return success_response({
         "student_id": student_id,
-        "student_name": f"{student.first_name} {student.last_name}",
-        "class_id": student.class_id,
-        "risk_level": student.risk_level.value if student.risk_level else None,
-        "wellbeing_score": student.wellbeing_score,
+        "student_name": student.display_name,
+        "class_id": student.profile.get("class_id") if student.profile else None,
+        "risk_level": student.profile.get("risk_level") if student.profile else None,
+        "wellbeing_score": student.profile.get("wellbeing_score") if student.profile else None,
         "assessments": {
             "total_completed": len(assessment_ids),
             "average_score": round(statistics.mean(assessment_scores.values()), 2) if assessment_scores else None,
@@ -693,16 +700,19 @@ async def get_assessment_monitoring(
     total_questions = len(template.questions)
     question_ids = {q['question_id'] for q in template.questions}
     
-    # Get all students who should take this assessment
+    # Get all students who should take this assessment (from b2b_users with role=STUDENT)
     expected_students = []
     if assessment.class_id:
-        students_query = db.query(Student).filter(Student.class_id == assessment.class_id)
+        students_query = db.query(User).filter(
+            User.role == UserRole.STUDENT,
+            User.profile['class_id'].astext == str(assessment.class_id)
+        )
         # Exclude students in exclusion list
         if assessment.excluded_students:
-            students_query = students_query.filter(~Student.student_id.in_(assessment.excluded_students))
+            students_query = students_query.filter(~User.user_id.in_(assessment.excluded_students))
         expected_students = students_query.all()
     
-    expected_student_ids = {s.student_id for s in expected_students}
+    expected_student_ids = {s.user_id for s in expected_students}
     
     # Get all responses for this assessment
     responses = (
@@ -730,14 +740,14 @@ async def get_assessment_monitoring(
     
     for student in expected_students:
         student_info = {
-            "student_id": student.student_id,
-            "student_name": f"{student.first_name} {student.last_name}"
+            "student_id": student.user_id,
+            "student_name": student.display_name
         }
         
-        if student.student_id not in student_responses:
+        if student.user_id not in student_responses:
             not_started_students.append(student_info)
         else:
-            data = student_responses[student.student_id]
+            data = student_responses[student.user_id]
             answered_count = len(data["question_ids"])
             missing_questions = question_ids - data["question_ids"]
             extra_questions = data["question_ids"] - question_ids
@@ -761,12 +771,12 @@ async def get_assessment_monitoring(
     unexpected_students = []
     for student_id in student_responses.keys():
         if student_id not in expected_student_ids:
-            student = db.query(Student).filter(Student.student_id == student_id).first()
+            student = get_student_by_id(db, student_id)
             if student:
                 data = student_responses[student_id]
                 unexpected_students.append({
                     "student_id": student_id,
-                    "student_name": f"{student.first_name} {student.last_name}",
+                    "student_name": student.display_name,
                     "answered_questions": len(data["question_ids"]),
                     "completed_at": data["completed_at"]
                 })
@@ -839,10 +849,10 @@ async def get_assessment_question_breakdown(
     for response in responses:
         q_id = response.question_id
         if q_id in question_data:
-            student = db.query(Student).filter(Student.student_id == response.student_id).first()
+            student = get_student_by_id(db, response.student_id)
             question_data[q_id]["responses"].append({
                 "student_id": response.student_id,
-                "student_name": f"{student.first_name} {student.last_name}" if student else "Unknown",
+                "student_name": student.display_name if student else "Unknown",
                 "answer": response.answer,
                 "score": response.score
             })
@@ -884,7 +894,7 @@ async def get_student_assessment_history(
     Get complete assessment history for a student with response details.
     Shows exactly what questions were answered for each assessment.
     """
-    student = db.query(Student).filter(Student.student_id == student_id).first()
+    student = get_student_by_id(db, student_id)
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     
@@ -942,7 +952,7 @@ async def get_student_assessment_history(
     
     return success_response({
         "student_id": student_id,
-        "student_name": f"{student.first_name} {student.last_name}",
+        "student_name": student.display_name,
         "total_assessments": len(history_list),
         "complete_assessments": len([a for a in history_list if a["is_complete"]]),
         "incomplete_assessments": len([a for a in history_list if not a["is_complete"]]),

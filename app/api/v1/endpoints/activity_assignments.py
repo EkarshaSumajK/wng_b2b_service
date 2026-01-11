@@ -9,7 +9,7 @@ from app.core.logging_config import get_logger
 from app.models.user import User
 from app.models.activity_assignment import ActivityAssignment, AssignmentStatus
 from app.models.activity_submission import ActivitySubmission, SubmissionStatus, FileType
-from app.models.student import Student
+from app.models.user import User, UserRole
 from app.models.class_model import Class
 from pydantic import BaseModel
 
@@ -89,7 +89,7 @@ def get_dashboard_stats(
     
     for cls in classes:
         # Count students
-        s_count = db.query(Student).filter(Student.class_id == cls.class_id).count()
+        s_count = db.query(User).filter(User.profile["class_id"].astext == str(cls.class_id)).count()
         total_students += s_count
         
         # Count active assignments
@@ -147,11 +147,11 @@ def create_assignment(
     db.refresh(new_assignment)
     
     # Create pending submissions for all students in the class
-    students = db.query(Student).filter(Student.class_id == assignment.class_id).all()
+    students = db.query(User).filter(User.profile["class_id"].astext == str(assignment.class_id)).all()
     for student in students:
         submission = ActivitySubmission(
             assignment_id=new_assignment.assignment_id,
-            student_id=student.student_id,
+            student_id=student.user_id,
             status=SubmissionStatus.PENDING
         )
         db.add(submission)
@@ -210,11 +210,11 @@ def get_assignment_submissions(
     # Enrich with student details manually for now (or use a Schema with relationships)
     result = []
     for sub in submissions:
-        student = db.query(Student).get(sub.student_id)
+        student = db.query(User).get(sub.student_id)
         result.append({
             "submission_id": sub.submission_id,
             "student_id": sub.student_id,
-            "student_name": f"{student.first_name} {student.last_name}",
+            "student_name": student.display_name,
             "file_url": sub.file_url,
             "status": sub.status,
             "submitted_at": sub.submitted_at,
@@ -324,8 +324,8 @@ def get_submission_comments(
             user = db.query(User).get(comment.user_id)
             sender_name = clean_name(user.display_name) if user else "Teacher"
         elif comment.student_id:
-            student = db.query(Student).get(comment.student_id)
-            sender_name = f"{student.first_name} {student.last_name}" if student else "Student"
+            student = db.query(User).get(comment.student_id)
+            sender_name = student.display_name if student else "Student"
             
         result.append({
             "comment_id": comment.comment_id,

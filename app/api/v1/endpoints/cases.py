@@ -7,6 +7,7 @@ from app.core.response import success_response
 from app.core.logging_config import get_logger
 from app.models.case import Case, JournalEntry
 from app.models.user import User, UserRole
+from app.models.class_model import Class
 from app.schemas.case import CaseCreate, CaseUpdate, CaseResponse, CaseDetailResponse, JournalEntryCreate, JournalEntryResponse
 
 # Initialize logger
@@ -88,10 +89,10 @@ async def get_case(case_id: UUID, db: Session = Depends(get_db)):
     return success_response(response_data)
 
 @router.get("")
-async def list_cases(school_id: UUID = None, student_id: UUID = None, status: str = None, risk_level: str = None, assigned_counsellor: UUID = None, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+async def list_cases(school_id: UUID = None, student_id: UUID = None, status: str = None, risk_level: str = None, assigned_counsellor: UUID = None, teacher_id: UUID = None, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     logger.debug(
         "Listing cases",
-        extra={"extra_data": {"school_id": str(school_id) if school_id else None, "student_id": str(student_id) if student_id else None, "status": status, "risk_level": risk_level}}
+        extra={"extra_data": {"school_id": str(school_id) if school_id else None, "student_id": str(student_id) if student_id else None, "status": status, "risk_level": risk_level, "teacher_id": str(teacher_id) if teacher_id else None}}
     )
     
     # Build base query with joined load for student (User model)
@@ -110,6 +111,25 @@ async def list_cases(school_id: UUID = None, student_id: UUID = None, status: st
         query = query.filter(Case.risk_level == risk_level)
     if assigned_counsellor:
         query = query.filter(Case.assigned_counsellor == assigned_counsellor)
+    
+    # Filter by teacher's classes if teacher_id is provided
+    if teacher_id:
+        # Get class IDs for this teacher
+        teacher_class_ids = db.query(Class.class_id).filter(Class.teacher_id == teacher_id).all()
+        teacher_class_ids = [str(c[0]) for c in teacher_class_ids]
+        if teacher_class_ids:
+            # Get student IDs from teacher's classes
+            student_ids_in_teacher_classes = db.query(User.user_id).filter(
+                User.profile["class_id"].astext.in_(teacher_class_ids)
+            ).all()
+            student_ids = [s[0] for s in student_ids_in_teacher_classes]
+            if student_ids:
+                query = query.filter(Case.student_id.in_(student_ids))
+            else:
+                return success_response([])
+        else:
+            # Teacher has no classes, return empty
+            return success_response([])
 
     cases = query.offset(skip).limit(limit).all()
     logger.debug(f"Found {len(cases)} cases")
@@ -127,10 +147,34 @@ async def list_cases(school_id: UUID = None, student_id: UUID = None, status: st
         )
         counsellors = {c.user_id: c for c in counsellor_results}
 
+    # Get all class IDs from students to fetch teachers
+    class_ids = []
+    for case in cases:
+        if case.student and case.student.profile and case.student.profile.get("class_id"):
+            class_ids.append(case.student.profile.get("class_id"))
+    
+    # Fetch classes with teachers in batch
+    teachers_by_class = {}
+    if class_ids:
+        classes_with_teachers = (
+            db.query(Class)
+            .options(joinedload(Class.teacher))
+            .filter(Class.class_id.in_(class_ids))
+            .all()
+        )
+        for cls in classes_with_teachers:
+            if cls.teacher:
+                teachers_by_class[str(cls.class_id)] = cls.teacher
+
     # Build response data for each case
     result = []
     for case in cases:
         counsellor = counsellors.get(case.assigned_counsellor) if case.assigned_counsellor else None
+        
+        # Get teacher for this student's class
+        teacher = None
+        if case.student and case.student.profile and case.student.profile.get("class_id"):
+            teacher = teachers_by_class.get(case.student.profile.get("class_id"))
 
         case_data = {
             "case": case,
@@ -141,8 +185,10 @@ async def list_cases(school_id: UUID = None, student_id: UUID = None, status: st
                 "display_name": case.student.display_name if case.student else None,
                 "email": case.student.email if case.student else None,
                 "school_id": case.student.school_id if case.student else None,
+                "class_id": case.student.profile.get("class_id") if case.student and case.student.profile else None,
             },
             "counsellor": None,
+            "teacher": None,
         }
 
         # Add counsellor data if exists
@@ -152,6 +198,15 @@ async def list_cases(school_id: UUID = None, student_id: UUID = None, status: st
                 "display_name": counsellor.display_name,
                 "email": counsellor.email,
                 "phone": counsellor.phone
+            }
+        
+        # Add teacher data if exists
+        if teacher:
+            case_data["teacher"] = {
+                "user_id": teacher.user_id,
+                "display_name": teacher.display_name,
+                "email": teacher.email,
+                "phone": teacher.phone
             }
 
         result.append(case_data)

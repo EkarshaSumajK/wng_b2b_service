@@ -2,10 +2,11 @@ from sqlalchemy import Column, String, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 import uuid
-from app.core.database import Base
+from app.models.base import Base
+
 
 class School(Base):
-    __tablename__ = "schools"
+    __tablename__ = "b2b_schools"
     
     school_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String, nullable=False)

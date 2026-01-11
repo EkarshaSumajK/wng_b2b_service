@@ -68,6 +68,9 @@ def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
     """
     Decode and validate JWT access token.
     
+    Accepts tokens from both B2B service and admin platform.
+    Admin platform tokens have type="access", B2B tokens may also have type="access".
+    
     Args:
         token: JWT token string
     
@@ -77,8 +80,9 @@ def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         
-        # Verify token type
-        if payload.get("type") != "access":
+        # Verify token type - accept "access" type or tokens without type (legacy)
+        token_type = payload.get("type")
+        if token_type and token_type not in ("access",):
             return None
             
         return payload

@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from datetime import timedelta, datetime
 from typing import Optional
 
-from app.core.database import get_db, get_auth_db
+from app.core.database import get_db
 from app.core.security import (
     verify_password,
     create_access_token,
@@ -14,7 +14,6 @@ from app.core.security import (
 from app.core.config import settings
 from app.core.logging_config import get_logger
 from app.models.user import User
-from app.models.b2b_user import B2BUser
 from pydantic import BaseModel, EmailStr
 
 # Initialize logger for this module
@@ -46,6 +45,24 @@ class UserInfo(BaseModel):
     school_id: str
 
 
+class UserProfileResponse(BaseModel):
+    """Full user profile with school information"""
+    user_id: str
+    email: str
+    display_name: str
+    role: str
+    phone: Optional[str] = None
+    profile_picture_url: Optional[str] = None
+    profile: Optional[dict] = None
+    availability: Optional[dict] = None
+    school_id: Optional[str] = None
+    school_name: Optional[str] = None
+    school_logo_url: Optional[str] = None
+    school_timezone: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
 class RefreshTokenRequest(BaseModel):
     refresh_token: str
 
@@ -59,19 +76,18 @@ class TokenResponse(BaseModel):
 @router.post("/login", response_model=LoginResponse)
 async def login(
     login_data: LoginRequest,
-    auth_db: Session = Depends(get_auth_db),
-    main_db: Session = Depends(get_db)
+    db: Session = Depends(get_db)
 ):
     """
     Login endpoint - returns JWT token
-    Authenticates against b2b_users table in admin platform database
+    Authenticates against b2b_users table
     """
     logger.info(f"Login attempt for email: {login_data.email}")
     
     # Find user by email in b2b_users table
-    b2b_user = auth_db.query(B2BUser).filter(B2BUser.email == login_data.email).first()
+    user = db.query(User).filter(User.email == login_data.email).first()
     
-    if not b2b_user:
+    if not user:
         logger.warning(f"Login failed - user not found: {login_data.email}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -80,10 +96,10 @@ async def login(
         )
     
     # Verify password
-    if not b2b_user.password_hash or not verify_password(login_data.password, b2b_user.password_hash):
+    if not user.hashed_password or not verify_password(login_data.password, user.hashed_password):
         logger.warning(
             f"Login failed - invalid password for user: {login_data.email}",
-            extra={"extra_data": {"b2b_user_id": str(b2b_user.b2b_user_id)}}
+            extra={"extra_data": {"user_id": str(user.user_id)}}
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -92,24 +108,16 @@ async def login(
         )
     
     # Update last login time
-    b2b_user.last_login_at = datetime.utcnow()
-    auth_db.commit()
-    
-    # If user_id is set, also fetch from main users table for compatibility
-    main_user = None
-    if b2b_user.user_id:
-        main_user = main_db.query(User).filter(User.user_id == b2b_user.user_id).first()
+    user.updated_at = datetime.utcnow()
+    db.commit()
     
     # Create token data
     token_data = {
-        "sub": b2b_user.email,
-        "b2b_user_id": str(b2b_user.b2b_user_id),
-        "role": b2b_user.role or "USER",
+        "sub": user.email,
+        "user_id": str(user.user_id),
+        "role": user.role.value if user.role else "USER",
+        "school_id": str(user.school_id) if user.school_id else None
     }
-    if b2b_user.user_id:
-        token_data["user_id"] = str(b2b_user.user_id)
-    if b2b_user.school_id:
-        token_data["school_id"] = str(b2b_user.school_id)
     
     # Create access token (short-lived: 30 minutes)
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -129,10 +137,9 @@ async def login(
         f"Login successful for user: {login_data.email}",
         extra={
             "extra_data": {
-                "b2b_user_id": str(b2b_user.b2b_user_id),
-                "user_id": str(b2b_user.user_id) if b2b_user.user_id else None,
-                "role": b2b_user.role,
-                "school_id": str(b2b_user.school_id) if b2b_user.school_id else None
+                "user_id": str(user.user_id),
+                "role": user.role.value if user.role else None,
+                "school_id": str(user.school_id) if user.school_id else None
             }
         }
     )
@@ -143,11 +150,11 @@ async def login(
         "token_type": "bearer",
         "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,  # Convert to seconds
         "user": {
-            "user_id": str(b2b_user.user_id) if b2b_user.user_id else str(b2b_user.b2b_user_id),
-            "email": b2b_user.email,
-            "display_name": b2b_user.name,
-            "role": b2b_user.role or "USER",
-            "school_id": str(b2b_user.school_id) if b2b_user.school_id else None
+            "user_id": str(user.user_id),
+            "email": user.email,
+            "display_name": user.display_name,
+            "role": user.role.value if user.role else "USER",
+            "school_id": str(user.school_id) if user.school_id else None
         }
     }
 
@@ -155,17 +162,17 @@ async def login(
 @router.post("/token")
 async def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
-    auth_db: Session = Depends(get_auth_db)
+    db: Session = Depends(get_db)
 ):
     """
     OAuth2 compatible token login (for Swagger UI)
-    Authenticates against b2b_users table in admin platform database
+    Authenticates against b2b_users table
     """
     logger.debug(f"Token login attempt for: {form_data.username}")
     
-    b2b_user = auth_db.query(B2BUser).filter(B2BUser.email == form_data.username).first()
+    user = db.query(User).filter(User.email == form_data.username).first()
     
-    if not b2b_user or not b2b_user.password_hash or not verify_password(form_data.password, b2b_user.password_hash):
+    if not user or not user.hashed_password or not verify_password(form_data.password, user.hashed_password):
         logger.warning(f"Token login failed for: {form_data.username}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -174,19 +181,16 @@ async def login_for_access_token(
         )
     
     # Update last login time
-    b2b_user.last_login_at = datetime.utcnow()
-    auth_db.commit()
+    user.updated_at = datetime.utcnow()
+    db.commit()
     
     # Create token data
     token_data = {
-        "sub": b2b_user.email,
-        "b2b_user_id": str(b2b_user.b2b_user_id),
-        "role": b2b_user.role or "USER",
+        "sub": user.email,
+        "user_id": str(user.user_id),
+        "role": user.role.value if user.role else "USER",
+        "school_id": str(user.school_id) if user.school_id else None
     }
-    if b2b_user.user_id:
-        token_data["user_id"] = str(b2b_user.user_id)
-    if b2b_user.school_id:
-        token_data["school_id"] = str(b2b_user.school_id)
     
     # Create access token
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -206,28 +210,79 @@ async def login_for_access_token(
 @router.get("/me", response_model=UserInfo)
 async def get_current_user_info(
     token: str = Depends(oauth2_scheme),
-    auth_db: Session = Depends(get_auth_db)
+    db: Session = Depends(get_db)
 ):
     """
-    Get current user information from token (from b2b_users table)
+    Get current user information from token
     """
-    from app.api.dependencies import get_current_b2b_user
+    from app.api.dependencies import get_current_user
     
     logger.debug("Fetching current user info from token")
     
-    b2b_user = await get_current_b2b_user(token, auth_db)
+    user = await get_current_user(token, db)
     
     logger.debug(
-        f"Retrieved user info for: {b2b_user.email}",
-        extra={"extra_data": {"b2b_user_id": str(b2b_user.b2b_user_id)}}
+        f"Retrieved user info for: {user.email}",
+        extra={"extra_data": {"user_id": str(user.user_id)}}
     )
     
     return {
-        "user_id": str(b2b_user.user_id) if b2b_user.user_id else str(b2b_user.b2b_user_id),
-        "email": b2b_user.email,
-        "display_name": b2b_user.name,
-        "role": b2b_user.role or "USER",
-        "school_id": str(b2b_user.school_id) if b2b_user.school_id else None
+        "user_id": str(user.user_id),
+        "email": user.email,
+        "display_name": user.display_name,
+        "role": user.role.value if user.role else "USER",
+        "school_id": str(user.school_id) if user.school_id else None
+    }
+
+
+@router.get("/profile", response_model=UserProfileResponse)
+async def get_user_profile(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """
+    Get full user profile with school information.
+    
+    Returns comprehensive profile data including:
+    - Basic user info (email, display_name, role, phone)
+    - Profile picture URL
+    - Role-specific profile data (JSON)
+    - Availability schedule (JSON)
+    - School details (name, logo, timezone)
+    - Timestamps (created_at, updated_at)
+    """
+    from app.api.dependencies import get_current_user
+    from app.models.school import School
+    
+    logger.debug("Fetching full user profile")
+    
+    user = await get_current_user(token, db)
+    
+    # Get school info if user has a school_id
+    school = None
+    if user.school_id:
+        school = db.query(School).filter(School.school_id == user.school_id).first()
+    
+    logger.info(
+        f"Retrieved full profile for user: {user.email}",
+        extra={"extra_data": {"user_id": str(user.user_id)}}
+    )
+    
+    return {
+        "user_id": str(user.user_id),
+        "email": user.email,
+        "display_name": user.display_name,
+        "role": user.role.value if user.role else "USER",
+        "phone": user.phone,
+        "profile_picture_url": user.profile_picture_url,
+        "profile": user.profile,
+        "availability": user.availability,
+        "school_id": str(user.school_id) if user.school_id else None,
+        "school_name": school.name if school else None,
+        "school_logo_url": school.logo_url if school else None,
+        "school_timezone": school.timezone if school else None,
+        "created_at": user.created_at,
+        "updated_at": user.updated_at
     }
 
 
@@ -243,7 +298,7 @@ async def logout():
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_access_token(
     refresh_data: RefreshTokenRequest,
-    auth_db: Session = Depends(get_auth_db)
+    db: Session = Depends(get_db)
 ):
     """
     Refresh access token using refresh token.
@@ -265,8 +320,8 @@ async def refresh_access_token(
         )
     
     # Extract user identifier
-    b2b_user_id = payload.get("b2b_user_id")
-    if not b2b_user_id:
+    user_id_str = payload.get("user_id")
+    if not user_id_str:
         logger.warning("Token refresh failed - missing user ID in token")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -274,10 +329,10 @@ async def refresh_access_token(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Verify user still exists and is active
+    # Verify user still exists
     from uuid import UUID
     try:
-        user_uuid = UUID(b2b_user_id)
+        user_uuid = UUID(user_id_str)
     except (ValueError, AttributeError):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -285,26 +340,23 @@ async def refresh_access_token(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    b2b_user = auth_db.query(B2BUser).filter(B2BUser.b2b_user_id == user_uuid).first()
+    user = db.query(User).filter(User.user_id == user_uuid).first()
     
-    if not b2b_user or not b2b_user.is_active:
-        logger.warning(f"Token refresh failed - user not found or inactive: {b2b_user_id}")
+    if not user:
+        logger.warning(f"Token refresh failed - user not found: {user_id_str}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found or inactive",
+            detail="User not found",
             headers={"WWW-Authenticate": "Bearer"},
         )
     
     # Create new access token with same data
     token_data = {
-        "sub": b2b_user.email,
-        "b2b_user_id": str(b2b_user.b2b_user_id),
-        "role": b2b_user.role or "USER",
+        "sub": user.email,
+        "user_id": str(user.user_id),
+        "role": user.role.value if user.role else "USER",
+        "school_id": str(user.school_id) if user.school_id else None
     }
-    if b2b_user.user_id:
-        token_data["user_id"] = str(b2b_user.user_id)
-    if b2b_user.school_id:
-        token_data["school_id"] = str(b2b_user.school_id)
     
     # Create new access token
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -314,8 +366,8 @@ async def refresh_access_token(
     )
     
     logger.info(
-        f"Token refresh successful for user: {b2b_user.email}",
-        extra={"extra_data": {"b2b_user_id": str(b2b_user.b2b_user_id)}}
+        f"Token refresh successful for user: {user.email}",
+        extra={"extra_data": {"user_id": str(user.user_id)}}
     )
     
     return {
@@ -323,4 +375,3 @@ async def refresh_access_token(
         "token_type": "bearer",
         "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60  # Convert to seconds
     }
-

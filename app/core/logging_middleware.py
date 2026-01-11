@@ -9,7 +9,6 @@ Provides comprehensive request/response logging including:
 """
 
 import time
-import uuid
 from typing import Callable
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -17,13 +16,14 @@ from starlette.responses import Response
 from fastapi import HTTPException
 
 from app.core.logging_config import (
-    get_logger, 
-    set_request_id, 
-    generate_request_id,
-    request_id_var
+    get_logger,
+    set_correlation_id,
+    get_correlation_id,
+    clear_correlation_id,
+    log_api_request,
 )
 
-logger = get_logger("middleware.logging")
+logger = get_logger(__name__)
 
 # Headers and fields to mask for security
 SENSITIVE_HEADERS = {"authorization", "cookie", "x-api-key", "api-key"}
@@ -65,7 +65,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
     Middleware for logging all HTTP requests and responses.
     
     Features:
-    - Generates unique request ID for tracking
+    - Generates unique correlation ID for tracking
     - Logs request details (method, path, query params)
     - Logs response status and timing
     - Logs errors with full context
@@ -73,12 +73,13 @@ class LoggingMiddleware(BaseHTTPMiddleware):
     """
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        # Generate and set request ID
-        request_id = request.headers.get("x-request-id") or generate_request_id()
-        set_request_id(request_id)
+        # Generate and set correlation ID
+        correlation_id = request.headers.get("x-request-id") or set_correlation_id()
+        if request.headers.get("x-request-id"):
+            set_correlation_id(correlation_id)
         
-        # Store request ID in request state for access in endpoints
-        request.state.request_id = request_id
+        # Store correlation ID in request state for access in endpoints
+        request.state.request_id = correlation_id
         
         # Capture request details
         start_time = time.perf_counter()
@@ -93,16 +94,12 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         # Log request start
         logger.info(
             f"Request started: {method} {path}",
-            extra={
-                "extra_data": {
-                    "request_id": request_id,
-                    "method": method,
-                    "path": path,
-                    "query_params": masked_query,
-                    "client_ip": client_ip,
-                    "user_agent": request.headers.get("user-agent", "unknown")[:100],
-                }
-            }
+            request_id=correlation_id,
+            method=method,
+            path=path,
+            query_params=masked_query,
+            client_ip=client_ip,
+            user_agent=request.headers.get("user-agent", "unknown")[:100],
         )
         
         # Process request
@@ -117,13 +114,9 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             error_detail = str(exc.detail)
             logger.warning(
                 f"HTTP exception: {method} {path} - {exc.status_code}",
-                extra={
-                    "extra_data": {
-                        "request_id": request_id,
-                        "status_code": exc.status_code,
-                        "detail": error_detail,
-                    }
-                }
+                request_id=correlation_id,
+                status_code=exc.status_code,
+                detail=error_detail,
             )
             raise
             
@@ -132,14 +125,9 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             error_detail = str(exc)
             logger.error(
                 f"Unhandled exception: {method} {path}",
-                exc_info=True,
-                extra={
-                    "extra_data": {
-                        "request_id": request_id,
-                        "error_type": type(exc).__name__,
-                        "error_message": error_detail,
-                    }
-                }
+                request_id=correlation_id,
+                error_type=type(exc).__name__,
+                error_message=error_detail,
             )
             raise
             
@@ -149,38 +137,52 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             
             # Log request completion
             status_code = response.status_code if response else 500
-            log_level = "info" if status_code < 400 else "warning" if status_code < 500 else "error"
             
-            log_func = getattr(logger, log_level)
-            log_func(
-                f"Request completed: {method} {path} - {status_code} ({duration_ms:.2f}ms)",
-                extra={
-                    "extra_data": {
-                        "request_id": request_id,
-                        "method": method,
-                        "path": path,
-                        "status_code": status_code,
-                        "duration_ms": round(duration_ms, 2),
-                        "client_ip": client_ip,
-                    }
-                }
-            )
+            if status_code < 400:
+                logger.info(
+                    f"Request completed: {method} {path} - {status_code} ({duration_ms:.2f}ms)",
+                    request_id=correlation_id,
+                    method=method,
+                    path=path,
+                    status_code=status_code,
+                    duration_ms=round(duration_ms, 2),
+                    client_ip=client_ip,
+                )
+            elif status_code < 500:
+                logger.warning(
+                    f"Request completed: {method} {path} - {status_code} ({duration_ms:.2f}ms)",
+                    request_id=correlation_id,
+                    method=method,
+                    path=path,
+                    status_code=status_code,
+                    duration_ms=round(duration_ms, 2),
+                    client_ip=client_ip,
+                )
+            else:
+                logger.error(
+                    f"Request completed: {method} {path} - {status_code} ({duration_ms:.2f}ms)",
+                    request_id=correlation_id,
+                    method=method,
+                    path=path,
+                    status_code=status_code,
+                    duration_ms=round(duration_ms, 2),
+                    client_ip=client_ip,
+                )
             
             # Log slow requests
             if duration_ms > 1000:  # > 1 second
                 logger.warning(
                     f"Slow request detected: {method} {path} took {duration_ms:.2f}ms",
-                    extra={
-                        "extra_data": {
-                            "request_id": request_id,
-                            "duration_ms": round(duration_ms, 2),
-                        }
-                    }
+                    request_id=correlation_id,
+                    duration_ms=round(duration_ms, 2),
                 )
+            
+            # Clear correlation ID after request
+            clear_correlation_id()
         
         # Add request ID to response headers for client tracking
         if response:
-            response.headers["X-Request-ID"] = request_id
+            response.headers["X-Request-ID"] = correlation_id
             
         return response
 
@@ -245,8 +247,7 @@ def log_database_errors(logger_instance=None):
                 return await func(*args, **kwargs)
             except Exception as e:
                 db_logger.error(
-                    f"Database error in {func.__name__}: {str(e)}",
-                    exc_info=True
+                    f"Database error in {func.__name__}: {str(e)}"
                 )
                 raise
         
@@ -256,8 +257,7 @@ def log_database_errors(logger_instance=None):
                 return func(*args, **kwargs)
             except Exception as e:
                 db_logger.error(
-                    f"Database error in {func.__name__}: {str(e)}",
-                    exc_info=True
+                    f"Database error in {func.__name__}: {str(e)}"
                 )
                 raise
         

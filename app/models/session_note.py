@@ -4,7 +4,8 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
 import enum
-from app.core.database import Base
+from app.models.base import Base
+
 
 class SessionType(str, enum.Enum):
     INDIVIDUAL = "INDIVIDUAL"
@@ -12,14 +13,15 @@ class SessionType(str, enum.Enum):
     ASSESSMENT = "ASSESSMENT"
     CONSULTATION = "CONSULTATION"
 
+
 class SessionNote(Base):
-    __tablename__ = "session_notes"
+    __tablename__ = "b2b_session_notes"
     
     session_note_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    case_id = Column(UUID(as_uuid=True), ForeignKey("cases.case_id"), nullable=False)
-    counsellor_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False)
+    case_id = Column(UUID(as_uuid=True), ForeignKey("b2b_cases.case_id"), nullable=False)
+    counsellor_id = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=False)
     date = Column(DateTime, nullable=False, default=datetime.utcnow)
-    duration = Column(Integer, nullable=True)  # Duration in minutes
+    duration = Column(Integer, nullable=True)
     type = Column(SQLEnum(SessionType), nullable=False)
     summary = Column(Text, nullable=True)
     interventions = Column(ARRAY(String), nullable=True)

@@ -6,12 +6,9 @@ from app.api.v1 import api_router
 from fastapi.staticfiles import StaticFiles
 import os
 
-# Import logging components
-from app.core.logging_config import setup_logging, get_logger
+# Import logging components (Loguru-based, auto-initializes on import)
+from app.core.logging_config import get_logger
 from app.core.logging_middleware import LoggingMiddleware
-
-# Initialize logging FIRST (before anything else)
-setup_logging()
 
 # Get logger for this module
 logger = get_logger(__name__)

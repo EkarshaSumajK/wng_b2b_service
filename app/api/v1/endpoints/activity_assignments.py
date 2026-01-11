@@ -165,9 +165,7 @@ def get_class_assignments(
     db: Session = Depends(get_db)
 ):
     """Get all assignments for a class"""
-    assignments = db.query(ActivityAssignment).options(
-        joinedload(ActivityAssignment.activity)
-    ).filter(
+    assignments = db.query(ActivityAssignment).filter(
         ActivityAssignment.class_id == class_id,
         ActivityAssignment.status == AssignmentStatus.ACTIVE
     ).all()
@@ -189,7 +187,7 @@ def get_class_assignments(
             "due_date": assignment.due_date,
             "status": assignment.status,
             "created_at": assignment.created_at,
-            "activity": assignment.activity,
+            "activity": None,  # Activity details fetched from external service by frontend
             "submission_count": submission_count,
             "total_students": total_students
         }

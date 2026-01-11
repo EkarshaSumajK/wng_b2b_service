@@ -4,53 +4,46 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
 import enum
-from app.core.database import Base
+from app.models.base import Base
+
 
 class AvailabilityStatus(str, enum.Enum):
     AVAILABLE = "Available"
     LIMITED = "Limited"
     UNAVAILABLE = "Unavailable"
 
+
 class Therapist(Base):
-    __tablename__ = "therapists"
+    __tablename__ = "b2b_therapists"
     
     therapist_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     
-    # Basic information
     name = Column(String, nullable=False, index=True)
     specialty = Column(String, nullable=False, index=True)
     bio = Column(Text, nullable=True)
     
-    # Ratings and reviews
-    rating = Column(Numeric(3, 2), nullable=False, default=0.0)  # 0.00 to 5.00
+    rating = Column(Numeric(3, 2), nullable=False, default=0.0)
     review_count = Column(Integer, nullable=False, default=0)
     
-    # Location
-    location = Column(String, nullable=False, index=True)  # Full address
+    location = Column(String, nullable=False, index=True)
     city = Column(String, nullable=False, index=True)
     state = Column(String, nullable=True)
-    distance_km = Column(Numeric(10, 2), nullable=True)  # Calculated distance from user
+    distance_km = Column(Numeric(10, 2), nullable=True)
     
-    # Professional details
     experience_years = Column(Integer, nullable=False)
-    languages = Column(JSON, nullable=False)  # Array of language strings
+    languages = Column(JSON, nullable=False)
     
-    # Availability and pricing
     availability_status = Column(SQLEnum(AvailabilityStatus), nullable=False, default=AvailabilityStatus.AVAILABLE, index=True)
     consultation_fee_min = Column(Numeric(10, 2), nullable=False)
     consultation_fee_max = Column(Numeric(10, 2), nullable=False)
     
-    # Additional information
-    qualifications = Column(JSON, nullable=True)  # Array of qualification objects
-    areas_of_expertise = Column(JSON, nullable=True)  # Array of expertise strings
+    qualifications = Column(JSON, nullable=True)
+    areas_of_expertise = Column(JSON, nullable=True)
     
-    # Media
     profile_image_url = Column(String, nullable=True)
     
-    # Verification
     verified = Column(Boolean, nullable=False, default=False)
     
-    # Metadata
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     

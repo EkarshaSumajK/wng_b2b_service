@@ -1,34 +1,33 @@
 from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from app.core.config import settings
 
-# Optimized database engine with connection pooling
-# Note: Neon uses pooled connections, so we use smaller pool sizes
+# Main database engine (b2b_ prefixed tables)
 engine = create_engine(
     settings.DATABASE_URL,
-    pool_pre_ping=True,  # Verify connections before using
-    pool_size=10,  # Smaller pool for Neon pooled connections
-    max_overflow=5,  # Additional connections when pool is full
-    pool_recycle=3600,  # Recycle connections after 1 hour
-    echo=False,  # Set to True for SQL debugging
+    pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=5,
+    pool_recycle=3600,
+    echo=False,
     connect_args={
-        "connect_timeout": 10,  # Connection timeout in seconds
-        # Note: statement_timeout not supported in Neon pooled connections
-        # Use unpooled connection string or set timeout at query level
+        "connect_timeout": 10,
     }
 )
 
+# Import Base from models
+from app.models.base import Base
+
+# Main session
 SessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,
     bind=engine,
-    expire_on_commit=False  # Prevent lazy loading after commit
+    expire_on_commit=False
 )
 
-Base = declarative_base()
-
 def get_db():
+    """Get database session."""
     db = SessionLocal()
     try:
         yield db
@@ -37,7 +36,7 @@ def get_db():
 
 
 # Activity Database - uses separate DATABASE_URL_ACTIVITY if configured
-activity_db_url = settings.DATABASE_URL_ACTIVITY or settings.DATABASE_URL
+activity_db_url = getattr(settings, 'DATABASE_URL_ACTIVITY', None) or settings.DATABASE_URL
 
 activity_engine = create_engine(
     activity_db_url,
@@ -67,31 +66,24 @@ def get_activity_db():
         db.close()
 
 
-# Auth Database - uses DATABASE_URL_AUTH for centralized authentication
-auth_engine = create_engine(
-    settings.DATABASE_URL_AUTH,
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=5,
-    pool_recycle=3600,
-    echo=False,
-    connect_args={
-        "connect_timeout": 10,
-    }
-)
+# Aliases for backward compatibility
+auth_engine = engine
+AuthSessionLocal = SessionLocal
 
-AuthSessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=auth_engine,
-    expire_on_commit=False
-)
+# Alias for get_db - backward compatibility
+get_auth_db = get_db
 
-def get_auth_db():
-    """Get database session for authentication (uses admin platform DB)."""
-    db = AuthSessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
+def create_tables():
+    """Create all database tables (b2b_ prefixed tables)."""
+    from app.models import (
+        School, User, Student, Class, Case, JournalEntry,
+        Assessment, AssessmentTemplate, StudentResponse, Observation,
+        Resource, Activity, RiskAlert, AIRecommendation, ConsentRecord,
+        Goal, DailyBooster, CalendarEvent, SessionNote, Webinar,
+        WebinarSchoolRegistration, WebinarRegistration, Therapist,
+        TherapistBooking, ActivityAssignment, ActivitySubmission,
+        SubmissionComment, StudentAppSession, StudentDailyStreak,
+        StudentStreakSummary, StudentWebinarAttendance
+    )
+    Base.metadata.create_all(bind=engine)

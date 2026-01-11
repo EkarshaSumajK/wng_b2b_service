@@ -6,9 +6,7 @@ from app.core.database import get_db
 from app.core.response import success_response
 from app.core.logging_config import get_logger
 from app.models.case import Case, JournalEntry
-from app.models.student import Student
 from app.models.user import User, UserRole
-from app.models.class_model import Class
 from app.schemas.case import CaseCreate, CaseUpdate, CaseResponse, CaseDetailResponse, JournalEntryCreate, JournalEntryResponse
 
 # Initialize logger
@@ -43,14 +41,10 @@ async def create_case(case_data: CaseCreate, db: Session = Depends(get_db)):
 async def get_case(case_id: UUID, db: Session = Depends(get_db)):
     logger.debug(f"Fetching case: {case_id}")
     
-    # Fetch case with related student, class, and teacher data
+    # Fetch case with related student (User model)
     case = (
         db.query(Case)
-        .options(
-            joinedload(Case.student)
-            .joinedload(Student.class_obj)
-            .joinedload(Class.teacher)
-        )
+        .options(joinedload(Case.student))
         .filter(Case.case_id == case_id)
         .first()
     )
@@ -68,44 +62,19 @@ async def get_case(case_id: UUID, db: Session = Depends(get_db)):
             .first()
         )
 
-    # Fetch parents data
-    parents = []
-    if case.student.parents_id:
-        parents = (
-            db.query(User)
-            .filter(
-                User.user_id.in_(case.student.parents_id),
-                User.role == UserRole.PARENT
-            )
-            .all()
-        )
-
     # Build response data
     response_data = {
         "case": case,
         "student": {
-            "student_id": case.student.student_id,
-            "first_name": case.student.first_name,
-            "last_name": case.student.last_name,
-            "gender": case.student.gender,
-            "class_id": case.student.class_id,
-            "class_name": case.student.class_obj.name if case.student.class_obj else None,
-            "parents_id": case.student.parents_id
+            "student_id": case.student.user_id if case.student else None,
+            "first_name": case.student.display_name.split()[0] if case.student and case.student.display_name else None,
+            "last_name": " ".join(case.student.display_name.split()[1:]) if case.student and case.student.display_name and len(case.student.display_name.split()) > 1 else None,
+            "display_name": case.student.display_name if case.student else None,
+            "email": case.student.email if case.student else None,
+            "school_id": case.student.school_id if case.student else None,
         },
-        "teacher": None,
         "counsellor": None,
-        "parents": []
     }
-
-    # Add teacher data if exists
-    if case.student.class_obj and case.student.class_obj.teacher:
-        teacher = case.student.class_obj.teacher
-        response_data["teacher"] = {
-            "user_id": teacher.user_id,
-            "display_name": teacher.display_name,
-            "email": teacher.email,
-            "phone": teacher.phone
-        }
 
     # Add counsellor data if exists
     if counsellor:
@@ -116,15 +85,6 @@ async def get_case(case_id: UUID, db: Session = Depends(get_db)):
             "phone": counsellor.phone
         }
 
-    # Add parents data
-    for parent in parents:
-        response_data["parents"].append({
-            "user_id": parent.user_id,
-            "display_name": parent.display_name,
-            "email": parent.email,
-            "phone": parent.phone
-        })
-
     return success_response(response_data)
 
 @router.get("")
@@ -134,18 +94,14 @@ async def list_cases(school_id: UUID = None, student_id: UUID = None, status: st
         extra={"extra_data": {"school_id": str(school_id) if school_id else None, "student_id": str(student_id) if student_id else None, "status": status, "risk_level": risk_level}}
     )
     
-    # Build base query with joined loads for efficient fetching
+    # Build base query with joined load for student (User model)
     query = (
         db.query(Case)
-        .options(
-            joinedload(Case.student)
-            .joinedload(Student.class_obj)
-            .joinedload(Class.teacher)
-        )
+        .options(joinedload(Case.student))
     )
 
     if school_id:
-        query = query.join(Case.student).filter(Student.school_id == school_id)
+        query = query.join(Case.student).filter(User.school_id == school_id)
     if student_id:
         query = query.filter(Case.student_id == student_id)
     if status:
@@ -158,12 +114,8 @@ async def list_cases(school_id: UUID = None, student_id: UUID = None, status: st
     cases = query.offset(skip).limit(limit).all()
     logger.debug(f"Found {len(cases)} cases")
 
-    # Get all counsellor IDs and parent IDs to fetch in batch
+    # Get all counsellor IDs to fetch in batch
     counsellor_ids = [case.assigned_counsellor for case in cases if case.assigned_counsellor]
-    all_parent_ids = []
-    for case in cases:
-        if case.student.parents_id:
-            all_parent_ids.extend(case.student.parents_id)
 
     # Fetch counsellors in batch
     counsellors = {}
@@ -175,59 +127,23 @@ async def list_cases(school_id: UUID = None, student_id: UUID = None, status: st
         )
         counsellors = {c.user_id: c for c in counsellor_results}
 
-    # Fetch parents in batch
-    parents = {}
-    if all_parent_ids:
-        parent_results = (
-            db.query(User)
-            .filter(User.user_id.in_(all_parent_ids), User.role == UserRole.PARENT)
-            .all()
-        )
-        parents = {p.user_id: p for p in parent_results}
-
     # Build response data for each case
     result = []
     for case in cases:
         counsellor = counsellors.get(case.assigned_counsellor) if case.assigned_counsellor else None
 
-        # Get parents for this student
-        case_parents = []
-        if case.student.parents_id:
-            for parent_id in case.student.parents_id:
-                parent = parents.get(parent_id)
-                if parent:
-                    case_parents.append({
-                        "user_id": parent.user_id,
-                        "display_name": parent.display_name,
-                        "email": parent.email,
-                        "phone": parent.phone
-                    })
-
         case_data = {
             "case": case,
             "student": {
-                "student_id": case.student.student_id,
-                "first_name": case.student.first_name,
-                "last_name": case.student.last_name,
-                "gender": case.student.gender,
-                "class_id": case.student.class_id,
-                "class_name": case.student.class_obj.name if case.student.class_obj else None,
-                "parents_id": case.student.parents_id
+                "student_id": case.student.user_id if case.student else None,
+                "first_name": case.student.display_name.split()[0] if case.student and case.student.display_name else None,
+                "last_name": " ".join(case.student.display_name.split()[1:]) if case.student and case.student.display_name and len(case.student.display_name.split()) > 1 else None,
+                "display_name": case.student.display_name if case.student else None,
+                "email": case.student.email if case.student else None,
+                "school_id": case.student.school_id if case.student else None,
             },
-            "teacher": None,
             "counsellor": None,
-            "parents": case_parents
         }
-
-        # Add teacher data if exists
-        if case.student.class_obj and case.student.class_obj.teacher:
-            teacher = case.student.class_obj.teacher
-            case_data["teacher"] = {
-                "user_id": teacher.user_id,
-                "display_name": teacher.display_name,
-                "email": teacher.email,
-                "phone": teacher.phone
-            }
 
         # Add counsellor data if exists
         if counsellor:

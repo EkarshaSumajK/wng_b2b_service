@@ -5,7 +5,7 @@ from uuid import UUID
 from datetime import datetime
 import os
 import shutil
-from app.core.database import get_auth_db  # Changed to use auth database
+from app.core.database import get_db, get_auth_db
 from app.core.response import success_response
 from app.core.logging_config import get_logger
 from app.models.school import School
@@ -64,7 +64,7 @@ async def list_schools(
 @router.get("/{school_id}")
 async def get_school(
     school_id: UUID,
-    db: Session = Depends(get_auth_db)  # Uses auth database for schools
+    db: Session = Depends(get_auth_db)
 ):
     logger.debug(f"Fetching school: {school_id}")
     school = db.query(School).filter(School.school_id == school_id).first()

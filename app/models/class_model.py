@@ -2,18 +2,19 @@ from sqlalchemy import Column, String, Integer, ForeignKey, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 import uuid
-from app.core.database import Base
+from app.models.base import Base
+
 
 class Class(Base):
-    __tablename__ = "classes"
+    __tablename__ = "b2b_classes"
     
     class_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    school_id = Column(UUID(as_uuid=True), ForeignKey("schools.school_id"), nullable=False)
-    name = Column(String, nullable=False)  # e.g., "Grade 5-A"
-    grade = Column(String, nullable=False)  # e.g., "5", "9", "12"
-    section = Column(String, nullable=True)  # e.g., "A", "B", "C"
-    academic_year = Column(String, nullable=True)  # e.g., "2024-2025"
-    teacher_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=True)  # Class teacher
+    school_id = Column(UUID(as_uuid=True), ForeignKey("b2b_schools.school_id"), nullable=False)
+    name = Column(String, nullable=False)
+    grade = Column(String, nullable=False)
+    section = Column(String, nullable=True)
+    academic_year = Column(String, nullable=True)
+    teacher_id = Column(UUID(as_uuid=True), ForeignKey("b2b_users.user_id"), nullable=True)
     capacity = Column(Integer, nullable=True)
     additional_info = Column(JSON, nullable=True)
     

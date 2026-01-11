@@ -8,8 +8,8 @@ import statistics
 from app.core.database import get_db
 from app.core.response import success_response
 from app.core.logging_config import get_logger
+from app.core.student_helpers import get_student_by_id, user_to_student_dict
 from app.models.assessment import Assessment, AssessmentTemplate, StudentResponse
-from app.models.student import Student
 from app.models.class_model import Class
 from app.models.user import User, UserRole
 from app.schemas.assessment import (
@@ -307,8 +307,10 @@ async def submit_assessment(
     if not assessment:
         raise HTTPException(status_code=404, detail="Assessment not found")
     
-    # Validate student exists
-    student = get_or_404(db, Student, Student.student_id == submission.student_id, "Student not found")
+    # Validate student exists (now in b2b_users with role=STUDENT)
+    student = get_student_by_id(db, submission.student_id)
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
     
     # Check if student already completed this assessment
     existing = db.query(StudentResponse).filter(
@@ -358,7 +360,7 @@ async def submit_assessment(
     return success_response({
         "assessment_id": submission.assessment_id,
         "student_id": submission.student_id,
-        "student_name": f"{student.first_name} {student.last_name}",
+        "student_name": student.display_name,
         "total_score": total_score,
         "completed_at": datetime.utcnow(),
         "responses": [{
@@ -395,10 +397,11 @@ async def get_assessment(
     student_data = {}
     for response in assessment.responses:
         if response.student_id not in student_data:
-            student = db.query(Student).filter(Student.student_id == response.student_id).first()
+            student = get_student_by_id(db, response.student_id)
+            student_name = student.display_name if student else "Unknown"
             student_data[response.student_id] = {
                 "student_id": response.student_id,
-                "student_name": f"{student.first_name} {student.last_name}",
+                "student_name": student_name,
                 "responses": [],
                 "total_score": 0.0,
                 "completed_at": response.completed_at
@@ -466,7 +469,9 @@ async def get_student_assessments(
     db: Session = Depends(get_db)
 ):
     """Get all completed assessments for one student with overall statistics and detailed responses"""
-    student = get_or_404(db, Student, Student.student_id == student_id, "Student not found")
+    student = get_student_by_id(db, student_id)
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
     
     # Get all responses for this student
     responses = (
@@ -518,8 +523,8 @@ async def get_student_assessments(
     overall_stats = calculate_statistics(all_scores)
     
     return success_response({
-        "student_id": student.student_id,
-        "student_name": f"{student.first_name} {student.last_name}",
+        "student_id": student.user_id,
+        "student_name": student.display_name,
         "total_assessments": len(assessment_data),
         "overall_statistics": {
             "average_score": overall_stats["mean"],
@@ -544,7 +549,9 @@ async def get_student_assessment_result(
         "Assessment not found"
     )
     
-    student = get_or_404(db, Student, Student.student_id == student_id, "Student not found")
+    student = get_student_by_id(db, student_id)
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
     
     responses = (
         db.query(StudentResponse)
@@ -582,7 +589,7 @@ async def get_student_assessment_result(
     return success_response({
         "assessment_id": assessment_id,
         "student_id": student_id,
-        "student_name": f"{student.first_name} {student.last_name}",
+        "student_name": student.display_name,
         "template_name": template.name,
         "category": template.category,
         "title": assessment.title,
@@ -633,10 +640,11 @@ async def get_assessment_all_students(
     student_data = {}
     for response in responses:
         if response.student_id not in student_data:
-            student = db.query(Student).filter(Student.student_id == response.student_id).first()
+            student = get_student_by_id(db, response.student_id)
+            student_name = student.display_name if student else "Unknown"
             student_data[response.student_id] = {
                 "student_id": response.student_id,
-                "student_name": f"{student.first_name} {student.last_name}",
+                "student_name": student_name,
                 "total_score": 0.0,
                 "completed_at": response.completed_at,
                 "responses": []

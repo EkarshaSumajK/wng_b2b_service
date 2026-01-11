@@ -9,7 +9,7 @@ from app.core.logging_config import get_logger
 from app.models.user import User, UserRole
 from app.models.class_model import Class
 from app.models.school import School
-from app.models.student import Student
+from app.models.user import User, UserRole
 from app.models.case import Case, CaseStatus, RiskLevel
 from app.models.observation import Observation, Severity
 from app.models.assessment import Assessment
@@ -165,9 +165,9 @@ async def get_teacher_students(
     for class_obj in classes:
         for student in class_obj.students:
             students.append({
-                "student_id": str(student.student_id),
-                "first_name": student.first_name,
-                "last_name": student.last_name,
+                "student_id": str(student.user_id),
+                "first_name": student.display_name.split()[0] if student and student.display_name else "",
+                "last_name": " ".join(student.display_name.split()[1:]) if student and student.display_name else "",
                 "class_name": class_obj.name,
                 "class_id": str(class_obj.class_id),
                 "gender": student.gender.value if student.gender else None
@@ -192,10 +192,10 @@ async def get_teacher_dashboard(
     
     # Get all classes taught by this teacher
     classes = db.query(Class).filter(Class.teacher_id == teacher_id).all()
-    class_ids = [c.class_id for c in classes]
+    class_ids = [str(c.class_id) for c in classes]
     
     # Get all students in these classes
-    students = db.query(Student).filter(Student.class_id.in_(class_ids)).all() if class_ids else []
+    students = db.query(User).filter(User.profile["class_id"].astext.in_(class_ids)).all() if class_ids else []
     student_ids = [s.student_id for s in students]
     
     # Total counts
@@ -361,8 +361,8 @@ async def get_all_classes_insights(
     
     for class_obj in classes:
         # Get students in this class
-        students = db.query(Student).filter(Student.class_id == class_obj.class_id).all()
-        student_ids = [s.student_id for s in students]
+        students = db.query(User).filter(User.profile["class_id"].astext == str(class_obj.class_id)).all()
+        student_ids = [s.user_id for s in students]
         
         if not student_ids:
             classes_insights.append({
@@ -442,17 +442,20 @@ async def get_all_classes_insights(
         # Student details with wellbeing status
         student_details = []
         for student in students:
-            case = cases_by_student.get(student.student_id)
-            recent_response = recent_responses_by_student.get(student.student_id)
+            case = cases_by_student.get(student.user_id)
+            recent_response = recent_responses_by_student.get(student.user_id)
             
             recent_score = None
             if recent_response and recent_response.score is not None:
                 recent_score = recent_response.score
             
+            # Get gender from profile JSON
+            gender = student.profile.get("gender") if student.profile else None
+            
             student_details.append({
-                "student_id": str(student.student_id),
-                "name": f"{student.first_name} {student.last_name}",
-                "gender": student.gender.value if student.gender else None,
+                "student_id": str(student.user_id),
+                "name": student.display_name,
+                "gender": gender,
                 "wellbeing_status": case.risk_level.value if case else "healthy",
                 "recent_assessment_score": recent_score,
                 "has_active_case": case is not None
@@ -502,8 +505,8 @@ async def get_class_insights(
         raise HTTPException(status_code=404, detail="Class not found or not assigned to this teacher")
     
     # Get students in this class
-    students = db.query(Student).filter(Student.class_id == class_id).all()
-    student_ids = [s.student_id for s in students]
+    students = db.query(User).filter(User.profile["class_id"].astext == str(class_id)).all()
+    student_ids = [s.user_id for s in students]
     
     # Get assessment performance via StudentResponse
     from app.models.assessment import StudentResponse as SR
@@ -564,16 +567,16 @@ async def get_class_insights(
     # Student list with wellbeing status
     student_details = []
     for student in students:
-        case = cases_by_student.get(student.student_id)
-        recent_response = recent_responses_by_student.get(student.student_id)
+        case = cases_by_student.get(student.user_id)
+        recent_response = recent_responses_by_student.get(student.user_id)
         
         recent_score = None
         if recent_response and recent_response.score is not None:
             recent_score = recent_response.score
         
         student_details.append({
-            "student_id": str(student.student_id),
-            "name": f"{student.first_name} {student.last_name}",
+            "student_id": str(student.user_id),
+            "name": student.display_name,
             "gender": student.gender.value if student.gender else None,
             "wellbeing_status": case.risk_level.value if case else "healthy",
             "recent_assessment_score": recent_score,

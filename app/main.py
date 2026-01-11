@@ -1,6 +1,7 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import Response
 from app.core.config import settings
 from app.api.v1 import api_router
 from fastapi.staticfiles import StaticFiles
@@ -24,21 +25,36 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Add Logging Middleware FIRST (to capture all requests)
-app.add_middleware(LoggingMiddleware)
+# Custom CORS middleware that handles preflight properly
+@app.middleware("http")
+async def cors_middleware(request: Request, call_next):
+    # Handle preflight OPTIONS requests
+    if request.method == "OPTIONS":
+        return Response(
+            status_code=200,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD",
+                "Access-Control-Allow-Headers": "*",
+                "Access-Control-Max-Age": "600",
+            }
+        )
+    
+    # Process the actual request
+    response = await call_next(request)
+    
+    # Add CORS headers to all responses
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    
+    return response
 
 # Gzip Compression Middleware - compress responses > 1KB
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-# CORS Middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=".*",  # Allow all origins with credentials
-    allow_credentials=True,
-    allow_methods=["*"],  # Allow all HTTP methods including PATCH
-    allow_headers=["*"],  # Allow all headers
-    max_age=0,  # Disable caching to fix persistent CORS errors
-)
+# Add Logging Middleware
+app.add_middleware(LoggingMiddleware)
 
 app.include_router(api_router, prefix="/api/v1")
 

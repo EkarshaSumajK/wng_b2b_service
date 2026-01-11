@@ -5,7 +5,7 @@ Uses batch queries, eager loading, and efficient aggregations.
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, joinedload, selectinload
-from sqlalchemy import func, and_, or_, case, desc, text, distinct
+from sqlalchemy import func, and_, or_, case, desc, text, distinct, String
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 from datetime import datetime, timedelta, date
@@ -17,14 +17,14 @@ from collections import defaultdict
 from app.core.database import get_db
 from app.core.response import success_response
 from app.core.logging_config import get_logger
-from app.models.student import Student, RiskLevel
+from app.models.user import User, UserRole
 from app.models.school import School
 from app.models.class_model import Class
-from app.models.user import User
 from app.models.assessment import Assessment, AssessmentTemplate, StudentResponse
 from app.models.activity_assignment import ActivityAssignment
 from app.models.activity_submission import ActivitySubmission, SubmissionStatus
 from app.models.activity import Activity
+from app.models.activity_engine import ActivityEngine
 from app.models.webinar import Webinar, WebinarSchoolRegistration
 from app.models.student_engagement import (
     StudentAppSession, StudentDailyStreak, 
@@ -64,22 +64,39 @@ async def get_school_overview(
     start_date, end_date = get_date_range(days)
     start_datetime = datetime.combine(start_date, datetime.min.time())
     
-    # Single query for student counts and risk distribution
-    student_stats = db.query(
-        func.count(Student.student_id).label('total'),
-        func.avg(Student.wellbeing_score).label('avg_wellbeing'),
-        func.sum(case((Student.risk_level == RiskLevel.LOW, 1), else_=0)).label('low_risk'),
-        func.sum(case((Student.risk_level == RiskLevel.MEDIUM, 1), else_=0)).label('medium_risk'),
-        func.sum(case((Student.risk_level.in_([RiskLevel.HIGH, RiskLevel.CRITICAL]), 1), else_=0)).label('high_risk')
-    ).filter(Student.school_id == school_id).first()
+    # Get all students for this school
+    students_in_school = db.query(User).filter(
+        User.school_id == school_id,
+        User.role == UserRole.STUDENT
+    ).all()
     
-    total_students = student_stats.total or 0
+    total_students = len(students_in_school)
+    
+    # Compute risk distribution and avg wellbeing from profile data
+    low_risk = 0
+    medium_risk = 0
+    high_risk = 0
+    wellbeing_scores = []
+    for s in students_in_school:
+        if s.profile:
+            risk = s.profile.get("risk_level", "").upper() if s.profile.get("risk_level") else ""
+            if risk == "LOW":
+                low_risk += 1
+            elif risk == "MEDIUM":
+                medium_risk += 1
+            elif risk in ["HIGH", "CRITICAL"]:
+                high_risk += 1
+            wb = s.profile.get("wellbeing_score")
+            if wb is not None:
+                wellbeing_scores.append(float(wb))
+    
+    avg_wellbeing = sum(wellbeing_scores) / len(wellbeing_scores) if wellbeing_scores else None
     
     # Class count
     total_classes = db.query(func.count(Class.class_id)).filter(Class.school_id == school_id).scalar() or 0
     
     # Get student IDs for this school (single query)
-    student_ids = [s[0] for s in db.query(Student.student_id).filter(Student.school_id == school_id).all()]
+    student_ids = [s.user_id for s in students_in_school]
     
     if not student_ids:
         return success_response({
@@ -120,60 +137,44 @@ async def get_school_overview(
         StudentResponse.completed_at.isnot(None)
     ).first()
     
-    # Top performers - single optimized query
-    top_performers_query = db.query(
-        Student.student_id,
-        Student.first_name,
-        Student.last_name,
-        Student.wellbeing_score,
-        Student.class_id,
-        StudentStreakSummary.current_streak
-    ).join(
-        StudentStreakSummary, Student.student_id == StudentStreakSummary.student_id
-    ).filter(
-        Student.school_id == school_id
-    ).order_by(desc(StudentStreakSummary.current_streak)).limit(5).all()
+    # Get streak data for all students
+    streak_data = {s.student_id: s for s in db.query(StudentStreakSummary).filter(
+        StudentStreakSummary.student_id.in_(student_ids)
+    ).order_by(desc(StudentStreakSummary.current_streak)).all()}
     
-    # Get class names for top performers
-    class_ids = [t.class_id for t in top_performers_query if t.class_id]
-    class_names = {c.class_id: c.name for c in db.query(Class.class_id, Class.name).filter(Class.class_id.in_(class_ids)).all()} if class_ids else {}
+    # Get class names
+    class_ids = list(set(s.profile.get("class_id") for s in students_in_school if s.profile and s.profile.get("class_id")))
+    class_names = {str(c.class_id): c.name for c in db.query(Class.class_id, Class.name).filter(Class.class_id.in_(class_ids)).all()} if class_ids else {}
     
-    top_performers = [{
-        "student_id": t.student_id,
-        "student_name": f"{t.first_name} {t.last_name}",
-        "class_name": class_names.get(t.class_id),
-        "daily_streak": t.current_streak or 0,
-        "wellbeing_score": t.wellbeing_score
-    } for t in top_performers_query]
+    # Top performers - students with best streaks
+    sorted_by_streak = sorted(students_in_school, key=lambda s: streak_data.get(s.user_id, StudentStreakSummary()).current_streak or 0, reverse=True)[:5]
+    top_performers = []
+    for s in sorted_by_streak:
+        streak = streak_data.get(s.user_id)
+        class_id = s.profile.get("class_id") if s.profile else None
+        top_performers.append({
+            "student_id": s.user_id,
+            "student_name": s.display_name,
+            "class_name": class_names.get(class_id) if class_id else None,
+            "daily_streak": streak.current_streak if streak else 0,
+            "wellbeing_score": s.profile.get("wellbeing_score") if s.profile else None
+        })
     
-    # At-risk students - single optimized query
-    at_risk_query = db.query(
-        Student.student_id,
-        Student.first_name,
-        Student.last_name,
-        Student.wellbeing_score,
-        Student.risk_level,
-        Student.class_id,
-        StudentStreakSummary.last_active_date
-    ).outerjoin(
-        StudentStreakSummary, Student.student_id == StudentStreakSummary.student_id
-    ).filter(
-        Student.school_id == school_id,
-        Student.risk_level.in_([RiskLevel.HIGH, RiskLevel.CRITICAL])
-    ).limit(10).all()
-    
-    # Get class names for at-risk
-    at_risk_class_ids = [a.class_id for a in at_risk_query if a.class_id]
-    at_risk_class_names = {c.class_id: c.name for c in db.query(Class.class_id, Class.name).filter(Class.class_id.in_(at_risk_class_ids)).all()} if at_risk_class_ids else {}
-    
-    at_risk_students = [{
-        "student_id": a.student_id,
-        "student_name": f"{a.first_name} {a.last_name}",
-        "class_name": at_risk_class_names.get(a.class_id),
-        "wellbeing_score": a.wellbeing_score,
-        "risk_level": a.risk_level.value if a.risk_level else "low",
-        "last_active": a.last_active_date.isoformat() if a.last_active_date else None
-    } for a in at_risk_query]
+    # At-risk students - filter by risk level from profile
+    at_risk_list = [s for s in students_in_school if s.profile and s.profile.get("risk_level", "").upper() in ["HIGH", "CRITICAL"]]
+    at_risk_list = sorted(at_risk_list, key=lambda s: s.profile.get("wellbeing_score") or 100)[:10]
+    at_risk_students = []
+    for s in at_risk_list:
+        streak = streak_data.get(s.user_id)
+        class_id = s.profile.get("class_id") if s.profile else None
+        at_risk_students.append({
+            "student_id": s.user_id,
+            "student_name": s.display_name,
+            "class_name": class_names.get(class_id) if class_id else None,
+            "wellbeing_score": s.profile.get("wellbeing_score") if s.profile else None,
+            "risk_level": (s.profile.get("risk_level") or "low").lower() if s.profile else "low",
+            "last_active": streak.last_active_date.isoformat() if streak and streak.last_active_date else None
+        })
     
     # Calculate completion rates
     activity_completion = round((activity_stats.completed or 0) / (activity_stats.total or 1) * 100, 1)
@@ -185,15 +186,15 @@ async def get_school_overview(
         "summary": {
             "total_students": total_students,
             "total_classes": total_classes,
-            "avg_wellbeing_score": round(student_stats.avg_wellbeing, 1) if student_stats.avg_wellbeing else None,
+            "avg_wellbeing_score": round(avg_wellbeing, 1) if avg_wellbeing else None,
             "avg_activity_completion": activity_completion,
-            "avg_daily_streak": round(streak_stats.avg_streak, 1) if streak_stats.avg_streak else 0,
+            "avg_daily_streak": round(streak_stats.avg_streak, 1) if streak_stats and streak_stats.avg_streak else 0,
             "total_app_openings": app_stats.total_sessions or 0
         },
         "risk_distribution": {
-            "low": student_stats.low_risk or 0,
-            "medium": student_stats.medium_risk or 0,
-            "high": student_stats.high_risk or 0
+            "low": low_risk,
+            "medium": medium_risk,
+            "high": high_risk
         },
         "engagement": {
             "total_app_openings": app_stats.total_sessions or 0,
@@ -235,22 +236,45 @@ async def get_classes_analytics(
         )
     
     classes = query.all()
-    class_ids = [c.class_id for c in classes]
+    class_ids = [str(c.class_id) for c in classes]
     
     if not class_ids:
         return success_response({"total_classes": 0, "classes": []})
     
-    # Batch query: student counts and wellbeing by class
-    student_stats = db.query(
-        Student.class_id,
-        func.count(Student.student_id).label('count'),
-        func.avg(Student.wellbeing_score).label('avg_wellbeing'),
-        func.sum(case((Student.risk_level == RiskLevel.LOW, 1), else_=0)).label('low'),
-        func.sum(case((Student.risk_level == RiskLevel.MEDIUM, 1), else_=0)).label('medium'),
-        func.sum(case((Student.risk_level.in_([RiskLevel.HIGH, RiskLevel.CRITICAL]), 1), else_=0)).label('high')
-    ).filter(Student.class_id.in_(class_ids)).group_by(Student.class_id).all()
+    # Get all students in these classes and compute stats in Python
+    students_in_classes = db.query(User).filter(
+        User.profile["class_id"].astext.in_(class_ids),
+        User.role == UserRole.STUDENT
+    ).all()
     
-    student_stats_map = {s.class_id: s for s in student_stats}
+    # Build student stats map by class_id
+    student_stats_map = {}
+    for s in students_in_classes:
+        class_id_str = s.profile.get("class_id") if s.profile else None
+        if not class_id_str:
+            continue
+        if class_id_str not in student_stats_map:
+            student_stats_map[class_id_str] = {
+                "class_id": class_id_str,
+                "count": 0,
+                "wellbeing_scores": [],
+                "low": 0,
+                "medium": 0,
+                "high": 0
+            }
+        stats = student_stats_map[class_id_str]
+        stats["count"] += 1
+        if s.profile:
+            wb = s.profile.get("wellbeing_score")
+            if wb is not None:
+                stats["wellbeing_scores"].append(float(wb))
+            risk = s.profile.get("risk_level", "").upper() if s.profile.get("risk_level") else ""
+            if risk == "LOW":
+                stats["low"] += 1
+            elif risk == "MEDIUM":
+                stats["medium"] += 1
+            elif risk in ["HIGH", "CRITICAL"]:
+                stats["high"] += 1
     
     # Batch query: assessment counts (assigned)
     # 1. School-wide assessments
@@ -260,34 +284,36 @@ async def get_classes_analytics(
     ).count()
     
     # 2. Class-specific assessments
-    class_assessment_counts = {row.class_id: row.count for row in db.query(
+    class_assessment_counts = {str(row.class_id): row.count for row in db.query(
         Assessment.class_id, func.count(Assessment.assessment_id).label('count')
     ).filter(Assessment.class_id.in_(class_ids)).group_by(Assessment.class_id).all()}
 
     # 3. Assessment completions (done)
-    assessment_done_sub = db.query(
-        Student.class_id, StudentResponse.student_id, StudentResponse.assessment_id
-    ).join(StudentResponse, Student.student_id == StudentResponse.student_id).filter(
-        Student.class_id.in_(class_ids),
+    # Use a direct query instead of subquery to avoid column naming issues
+    assessment_done_map = {}
+    assessment_done_results = db.query(
+        User.profile["class_id"].astext.label('class_id'),
+        func.count(func.distinct(StudentResponse.assessment_id)).label('count')
+    ).join(StudentResponse, User.user_id == StudentResponse.student_id).filter(
+        User.profile["class_id"].astext.in_(class_ids),
         StudentResponse.completed_at.isnot(None)
-    ).distinct().subquery()
+    ).group_by(User.profile["class_id"].astext).all()
     
-    assessment_done_map = {row.class_id: row.count for row in db.query(
-        assessment_done_sub.c.class_id, func.count().label('count')
-    ).group_by(assessment_done_sub.c.class_id).all()}
+    for row in assessment_done_results:
+        assessment_done_map[row.class_id] = row.count
 
     # Batch query: activity counts (assigned)
-    activity_assigned_counts = {row.class_id: row.count for row in db.query(
+    activity_assigned_counts = {str(row.class_id): row.count for row in db.query(
         ActivityAssignment.class_id, func.count(distinct(ActivityAssignment.activity_id)).label('count')
     ).filter(ActivityAssignment.class_id.in_(class_ids)).group_by(ActivityAssignment.class_id).all()}
 
     # Batch query: activity completions (done)
     activity_done_map = {row.class_id: row.count for row in db.query(
-        Student.class_id, func.count(ActivitySubmission.submission_id).label('count')
-    ).join(ActivitySubmission, Student.student_id == ActivitySubmission.student_id).filter(
-        Student.class_id.in_(class_ids),
+        User.profile["class_id"].astext.label('class_id'), func.count(ActivitySubmission.submission_id).label('count')
+    ).join(ActivitySubmission, User.user_id == ActivitySubmission.student_id).filter(
+        User.profile["class_id"].astext.in_(class_ids),
         ActivitySubmission.status.in_([SubmissionStatus.SUBMITTED, SubmissionStatus.VERIFIED])
-    ).group_by(Student.class_id).all()}
+    ).group_by(User.profile["class_id"].astext).all()}
 
     # Batch query: webinar counts (assigned - based on school registrations)
     school_webinars_count = db.query(WebinarSchoolRegistration.webinar_id).filter(
@@ -296,33 +322,34 @@ async def get_classes_analytics(
 
     # Batch query: webinar attendance (done)
     webinar_done_map = {row.class_id: row.count for row in db.query(
-        Student.class_id, func.count(StudentWebinarAttendance.id).label('count')
-    ).join(StudentWebinarAttendance, Student.student_id == StudentWebinarAttendance.student_id).filter(
-        Student.class_id.in_(class_ids),
+        User.profile["class_id"].astext.label('class_id'), func.count(StudentWebinarAttendance.id).label('count')
+    ).join(StudentWebinarAttendance, User.user_id == StudentWebinarAttendance.student_id).filter(
+        User.profile["class_id"].astext.in_(class_ids),
         StudentWebinarAttendance.attended == True
-    ).group_by(Student.class_id).all()}
+    ).group_by(User.profile["class_id"].astext).all()}
 
     # Build response
     class_analytics = []
     for cls in classes:
-        stats = student_stats_map.get(cls.class_id)
-        student_count = stats.count if stats else 0
+        stats = student_stats_map.get(str(cls.class_id))
+        student_count = stats["count"] if stats else 0
+        avg_wellbeing = sum(stats["wellbeing_scores"]) / len(stats["wellbeing_scores"]) if stats and stats["wellbeing_scores"] else None
         
         # Assessment metrics
-        total_ass_per_student = school_assessments_count + class_assessment_counts.get(cls.class_id, 0)
+        total_ass_per_student = school_assessments_count + class_assessment_counts.get(str(cls.class_id), 0)
         ass_total = total_ass_per_student * student_count
-        ass_done = assessment_done_map.get(cls.class_id, 0)
+        ass_done = assessment_done_map.get(str(cls.class_id), 0)
         ass_rate = round((ass_done / ass_total * 100), 1) if ass_total > 0 else 0
         
         # Activity metrics
-        total_act_per_student = activity_assigned_counts.get(cls.class_id, 0)
+        total_act_per_student = activity_assigned_counts.get(str(cls.class_id), 0)
         act_total = total_act_per_student * student_count
-        act_done = activity_done_map.get(cls.class_id, 0)
+        act_done = activity_done_map.get(str(cls.class_id), 0)
         act_rate = round((act_done / act_total * 100), 1) if act_total > 0 else 0
         
         # Webinar metrics
         web_total = school_webinars_count * student_count
-        web_done = webinar_done_map.get(cls.class_id, 0)
+        web_done = webinar_done_map.get(str(cls.class_id), 0)
         # Ensure done doesn't exceed total (can happen if students moved classes after attending)
         web_done = min(web_done, web_total) if web_total > 0 else web_done
         web_rate = round((web_done / web_total * 100), 1) if web_total > 0 else 0
@@ -339,7 +366,7 @@ async def get_classes_analytics(
             "total_students": student_count,
             "totalStudents": student_count,
             "metrics": {
-                "avg_wellbeing": round(stats.avg_wellbeing, 1) if stats and stats.avg_wellbeing else None,
+                "avg_wellbeing": round(avg_wellbeing, 1) if avg_wellbeing else None,
                 "assessment_completion": ass_rate,
                 "activity_completion": act_rate,
                 "webinar_attendance": web_rate
@@ -348,11 +375,11 @@ async def get_classes_analytics(
             "activities": {"rate": act_rate, "done": act_done, "total": act_total},
             "webinars": {"rate": web_rate, "done": web_done, "total": web_total},
             "risk_distribution": {
-                "low": stats.low if stats else 0,
-                "medium": stats.medium if stats else 0,
-                "high": stats.high if stats else 0
+                "low": stats["low"] if stats else 0,
+                "medium": stats["medium"] if stats else 0,
+                "high": stats["high"] if stats else 0
             },
-            "at_risk_count": stats.high if stats else 0
+            "at_risk_count": stats["high"] if stats else 0
         })
     
     return success_response({"total_classes": len(class_analytics), "classes": class_analytics})
@@ -374,13 +401,13 @@ async def get_class_analytics(
     if not cls:
         raise HTTPException(status_code=404, detail="Class not found")
     
-    # Get all students with their IDs
-    students = db.query(
-        Student.student_id, Student.first_name, Student.last_name,
-        Student.wellbeing_score, Student.risk_level
-    ).filter(Student.class_id == class_id).all()
+    # Get all students in this class
+    students = db.query(User).filter(
+        User.profile["class_id"].astext == str(class_id),
+        User.role == UserRole.STUDENT
+    ).all()
     
-    student_ids = [s.student_id for s in students]
+    student_ids = [s.user_id for s in students]
     
     if not student_ids:
         return success_response({
@@ -415,8 +442,8 @@ async def get_class_analytics(
     risk_dist = {"low": 0, "medium": 0, "high": 0}
     
     for s in students:
-        streak = streak_map.get(s.student_id)
-        risk = s.risk_level.value.lower() if s.risk_level else "low"
+        streak = streak_map.get(s.user_id)
+        risk = (s.profile.get("risk_level") or "low").lower() if s.profile else "low"
         if risk in ["high", "critical"]:
             risk_dist["high"] += 1
         elif risk == "medium":
@@ -424,17 +451,18 @@ async def get_class_analytics(
         else:
             risk_dist["low"] += 1
         
-        if s.wellbeing_score:
-            wellbeing_scores.append(s.wellbeing_score)
+        wb = s.profile.get("wellbeing_score") if s.profile else None
+        if wb is not None:
+            wellbeing_scores.append(float(wb))
         
         student_list.append({
-            "student_id": s.student_id,
-            "name": f"{s.first_name} {s.last_name}",
-            "wellbeing_score": s.wellbeing_score,
+            "student_id": s.user_id,
+            "name": s.display_name,
+            "wellbeing_score": wb,
             "risk_level": risk,
             "daily_streak": streak.current_streak if streak else 0,
-            "assessments_completed": assessment_counts.get(s.student_id, 0),
-            "activities_completed": activity_counts.get(s.student_id, 0),
+            "assessments_completed": assessment_counts.get(s.user_id, 0),
+            "activities_completed": activity_counts.get(s.user_id, 0),
             "last_active": streak.last_active_date.isoformat() if streak and streak.last_active_date else None
         })
     
@@ -450,7 +478,7 @@ async def get_class_analytics(
         "total_students": len(students),
         "metrics": {
             "avg_wellbeing": safe_mean(wellbeing_scores),
-            "avg_daily_streak": safe_mean([streak_map.get(s.student_id, type('', (), {'current_streak': 0})()).current_streak or 0 for s in students] if streak_map else [0]),
+            "avg_daily_streak": safe_mean([streak_map.get(s.user_id, StudentStreakSummary()).current_streak or 0 for s in students] if streak_map else [0]),
             "avg_app_openings": avg_app,
             "avg_session_time": avg_session
         },
@@ -477,52 +505,61 @@ async def get_students_analytics(
     start_date, end_date = get_date_range(days)
     start_datetime = datetime.combine(start_date, datetime.min.time())
     
-    # Build base query
-    query = db.query(Student).filter(Student.school_id == school_id)
+    # Build base query - get all students first, then filter in Python for profile-based filters
+    base_query = db.query(User).filter(
+        User.school_id == school_id,
+        User.role == UserRole.STUDENT
+    )
     
     if class_id:
-        query = query.filter(Student.class_id == class_id)
+        base_query = base_query.filter(User.profile["class_id"].astext == str(class_id))
     if search:
-        query = query.filter(or_(
-            Student.first_name.ilike(f"%{search}%"),
-            Student.last_name.ilike(f"%{search}%")
-        ))
-    if risk_level:
-        risk_map = {"low": RiskLevel.LOW, "medium": RiskLevel.MEDIUM, "high": RiskLevel.HIGH}
-        if risk_level.lower() in risk_map:
-            query = query.filter(Student.risk_level == risk_map[risk_level.lower()])
+        base_query = base_query.filter(User.display_name.ilike(f"%{search}%"))
     
-    total_students = query.count()
+    # Get all matching students
+    all_students = base_query.all()
+    
+    # Filter by risk level in Python if specified
+    if risk_level:
+        risk_upper = risk_level.upper()
+        if risk_upper == "HIGH":
+            all_students = [s for s in all_students if s.profile and s.profile.get("risk_level", "").upper() in ["HIGH", "CRITICAL"]]
+        elif risk_upper in ["LOW", "MEDIUM"]:
+            all_students = [s for s in all_students if s.profile and s.profile.get("risk_level", "").upper() == risk_upper]
+    
+    total_students = len(all_students)
     total_pages = (total_students + limit - 1) // limit
     
-    students = query.offset((page - 1) * limit).limit(limit).all()
-    student_ids = [s.student_id for s in students]
+    # Apply pagination
+    offset = (page - 1) * limit
+    students = all_students[offset:offset + limit]
+    student_ids = [s.user_id for s in students]
     
     if not student_ids:
         return success_response({"total_students": total_students, "page": page, "limit": limit, "total_pages": total_pages, "students": []})
     
     # Batch queries
-    class_ids = list(set(s.class_id for s in students if s.class_id))
-    class_names = {c.class_id: c.name for c in db.query(Class.class_id, Class.name).filter(Class.class_id.in_(class_ids)).all()} if class_ids else {}
+    class_ids_from_students = list(set(s.profile.get("class_id") for s in students if s.profile and s.profile.get("class_id")))
+    class_names = {str(c.class_id): c.name for c in db.query(Class.class_id, Class.name).filter(Class.class_id.in_(class_ids_from_students)).all()} if class_ids_from_students else {}
     
     # Batch queries for class-wise totals
-    class_assessment_counts = {row.class_id: row.count for row in db.query(
+    class_assessment_counts = {str(row.class_id): row.count for row in db.query(
         Assessment.class_id, func.count(Assessment.assessment_id).label('count')
-    ).filter(Assessment.class_id.in_(class_ids)).group_by(Assessment.class_id).all()} if class_ids else {}
+    ).filter(Assessment.class_id.in_(class_ids_from_students)).group_by(Assessment.class_id).all()} if class_ids_from_students else {}
 
-    class_activity_counts = {row.class_id: row.count for row in db.query(
+    class_activity_counts = {str(row.class_id): row.count for row in db.query(
         ActivityAssignment.class_id, func.count(ActivityAssignment.assignment_id).label('count')
-    ).filter(ActivityAssignment.class_id.in_(class_ids)).group_by(ActivityAssignment.class_id).all()} if class_ids else {}
+    ).filter(ActivityAssignment.class_id.in_(class_ids_from_students)).group_by(ActivityAssignment.class_id).all()} if class_ids_from_students else {}
 
     class_webinar_counts = {}
-    if class_ids:
+    if class_ids_from_students:
         # Get all webinar registrations for this school
         registrations = db.query(WebinarSchoolRegistration).filter(
             WebinarSchoolRegistration.school_id == school_id
         ).all()
         
         # Calculate total per class
-        for cid in class_ids:
+        for cid in class_ids_from_students:
             total_for_class = 0
             for reg in registrations:
                 # Include if registration is school-wide (no class_ids) or includes this class
@@ -561,32 +598,33 @@ async def get_students_analytics(
     # Build response
     student_list = []
     for s in students:
-        streak = streak_map.get(s.student_id)
-        acts = activity_stats.get(s.student_id, (0, 0))
+        streak = streak_map.get(s.user_id)
+        acts = activity_stats.get(s.user_id, (0, 0))
+        class_id_str = s.profile.get("class_id") if s.profile else None
         
         # Use class-wise total or fallback to submission total if strictly student-based logic preferred
         # But 'total' usually implies 'total assigned to class'
-        total_assessments = class_assessment_counts.get(s.class_id, 0)
-        total_activities = class_activity_counts.get(s.class_id, 0) # Override acts[0] if we want class total
-        total_webinars = class_webinar_counts.get(s.class_id, 0)
+        total_assessments = class_assessment_counts.get(class_id_str, 0)
+        total_activities = class_activity_counts.get(class_id_str, 0) # Override acts[0] if we want class total
+        total_webinars = class_webinar_counts.get(class_id_str, 0)
         
         student_list.append({
-            "student_id": s.student_id,
-            "name": f"{s.first_name} {s.last_name}",
-            "class_id": s.class_id,
-            "class_name": class_names.get(s.class_id),
-            "wellbeing_score": s.wellbeing_score,
-            "risk_level": s.risk_level.value.lower() if s.risk_level else "low",
+            "student_id": s.user_id,
+            "name": s.display_name,
+            "class_id": class_id_str,
+            "class_name": class_names.get(class_id_str),
+            "wellbeing_score": s.profile.get("wellbeing_score") if s.profile else None,
+            "risk_level": (s.profile.get("risk_level") or "low").lower() if s.profile else "low",
             "daily_streak": streak.current_streak if streak else 0,
             "max_streak": streak.max_streak if streak else 0,
             "last_active": streak.last_active_date.isoformat() if streak and streak.last_active_date else None,
-            "assessments_completed": assessment_counts.get(s.student_id, 0),
+            "assessments_completed": assessment_counts.get(s.user_id, 0),
             "assessments_total": total_assessments,
             "activities_completed": acts[1] or 0, 
             "activities_total": total_activities, 
-            "webinars_attended": webinar_attendance_counts.get(s.student_id, 0),
+            "webinars_attended": webinar_attendance_counts.get(s.user_id, 0),
             "webinars_total": total_webinars,
-            "app_openings": app_counts.get(s.student_id, 0)
+            "app_openings": app_counts.get(s.user_id, 0)
         })
     
     return success_response({
@@ -613,9 +651,7 @@ async def get_student_assessment_history(
     db: Session = Depends(get_db)
 ):
     """Student assessment history - optimized."""
-    student = db.query(Student.student_id, Student.first_name, Student.last_name).filter(
-        Student.student_id == student_id
-    ).first()
+    student = db.query(User).filter(User.user_id == student_id).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     
@@ -669,7 +705,7 @@ async def get_student_assessment_history(
     
     return success_response({
         "student_id": student_id,
-        "student_name": f"{student.first_name} {student.last_name}",
+        "student_name": student.display_name,
         "total_assessments": len(assessments),
         "assessments": assessments
     })
@@ -685,9 +721,7 @@ async def get_student_activity_history(
     db: Session = Depends(get_db)
 ):
     """Student activity history - optimized."""
-    student = db.query(Student.student_id, Student.first_name, Student.last_name).filter(
-        Student.student_id == student_id
-    ).first()
+    student = db.query(User).filter(User.user_id == student_id).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     
@@ -703,7 +737,7 @@ async def get_student_activity_history(
     
     # Filtered query
     query = db.query(ActivitySubmission).options(
-        joinedload(ActivitySubmission.assignment).joinedload(ActivityAssignment.activity)
+        joinedload(ActivitySubmission.assignment)
     ).filter(ActivitySubmission.student_id == student_id)
     
     if status:
@@ -717,22 +751,32 @@ async def get_student_activity_history(
     
     submissions = query.order_by(ActivitySubmission.created_at.desc()).all()
     
-    activities = [{
-        "submission_id": sub.submission_id,
-        "activity_id": sub.assignment.activity.activity_id if sub.assignment and sub.assignment.activity else None,
-        "activity_title": sub.assignment.activity.title if sub.assignment and sub.assignment.activity else None,
-        "activity_type": sub.assignment.activity.type.value if sub.assignment and sub.assignment.activity and sub.assignment.activity.type else None,
-        "assigned_at": sub.assignment.created_at if sub.assignment else None,
-        "due_date": sub.assignment.due_date if sub.assignment else None,
-        "submitted_at": sub.submitted_at,
-        "status": sub.status.value,
-        "feedback": sub.feedback,
-        "file_url": sub.file_url
-    } for sub in submissions]
+    # Batch fetch activities
+    activity_ids = [sub.assignment.activity_id for sub in submissions if sub.assignment]
+    activities_map = {}
+    if activity_ids:
+        activities_data = db.query(ActivityEngine).filter(ActivityEngine.activity_id.in_(activity_ids)).all()
+        activities_map = {str(a.activity_id): a for a in activities_data}
+    
+    activities = []
+    for sub in submissions:
+        activity = activities_map.get(str(sub.assignment.activity_id)) if sub.assignment else None
+        activities.append({
+            "submission_id": sub.submission_id,
+            "activity_id": activity.activity_id if activity else (sub.assignment.activity_id if sub.assignment else None),
+            "activity_title": activity.title if activity else None,
+            "activity_type": activity.activity_type if activity and activity.activity_type else None,
+            "assigned_at": sub.assignment.created_at if sub.assignment else None,
+            "due_date": sub.assignment.due_date if sub.assignment else None,
+            "submitted_at": sub.submitted_at,
+            "status": sub.status.value,
+            "feedback": sub.feedback,
+            "file_url": sub.file_url
+        })
     
     return success_response({
         "student_id": student_id,
-        "student_name": f"{student.first_name} {student.last_name}",
+        "student_name": student.display_name,
         "total_activities": sum(status_breakdown.values()),
         "status_breakdown": status_breakdown,
         "activities": activities
@@ -749,9 +793,7 @@ async def get_student_webinar_history(
     db: Session = Depends(get_db)
 ):
     """Student webinar history - optimized."""
-    student = db.query(Student.student_id, Student.first_name, Student.last_name).filter(
-        Student.student_id == student_id
-    ).first()
+    student = db.query(User).filter(User.user_id == student_id).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     
@@ -792,7 +834,7 @@ async def get_student_webinar_history(
     
     return success_response({
         "student_id": student_id,
-        "student_name": f"{student.first_name} {student.last_name}",
+        "student_name": student.display_name,
         "total_webinars": total,
         "attended_count": attended_count,
         "missed_count": total - attended_count,
@@ -810,9 +852,7 @@ async def get_student_streak_details(
     db: Session = Depends(get_db)
 ):
     """Student streak details - optimized."""
-    student = db.query(Student.student_id, Student.first_name, Student.last_name).filter(
-        Student.student_id == student_id
-    ).first()
+    student = db.query(User).filter(User.user_id == student_id).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     
@@ -878,7 +918,7 @@ async def get_student_streak_details(
     
     return success_response({
         "student_id": student_id,
-        "student_name": f"{student.first_name} {student.last_name}",
+        "student_name": student.display_name,
         "current_streak": streak_summary.current_streak if streak_summary else 0,
         "max_streak": streak_summary.max_streak if streak_summary else 0,
         "total_active_days": streak_summary.total_active_days if streak_summary else 0,
@@ -900,9 +940,9 @@ async def get_school_trends(
     start_date, end_date = get_date_range(days)
     
     # Get all student IDs for this school/teacher
-    query = db.query(Student.student_id).filter(Student.school_id == school_id)
+    query = db.query(User.user_id).filter(User.school_id == school_id)
     if teacher_id:
-        query = query.join(Class, Student.class_id == Class.class_id).filter(Class.teacher_id == teacher_id)
+        query = query.join(Class, User.profile["class_id"].astext == func.cast(Class.class_id, String)).filter(Class.teacher_id == teacher_id)
         
     student_ids = [s[0] for s in query.all()]
     
@@ -989,8 +1029,10 @@ async def get_school_assessments(
 ):
     """List of assessments with completion stats."""
     start_date, end_date = get_date_range(days)
+    start_datetime = datetime.combine(start_date, datetime.min.time())
     
     # Get all assessment templates used in the school/class
+    # Use LEFT JOIN so assessments with no responses still show up
     query = db.query(
         AssessmentTemplate.template_id,
         AssessmentTemplate.name,
@@ -998,9 +1040,9 @@ async def get_school_assessments(
         func.count(func.distinct(StudentResponse.student_id)).label('submitted_count'),
         func.avg(StudentResponse.score).label('avg_score')
     ).join(Assessment, Assessment.template_id == AssessmentTemplate.template_id
-    ).join(StudentResponse, and_(
+    ).outerjoin(StudentResponse, and_(
         StudentResponse.assessment_id == Assessment.assessment_id,
-        StudentResponse.completed_at >= datetime.combine(start_date, datetime.min.time())
+        StudentResponse.completed_at.isnot(None)
     ))
 
     if class_id:
@@ -1016,11 +1058,19 @@ async def get_school_assessments(
     
     # Get total students assigned
     if class_id:
-        student_count_query = db.query(func.count(Student.student_id)).filter(Student.class_id == class_id)
+        student_count_query = db.query(func.count(User.user_id)).filter(
+            User.profile["class_id"].astext == str(class_id),
+            User.role == UserRole.STUDENT
+        )
     elif teacher_id:
-        student_count_query = db.query(func.count(Student.student_id)).join(Class, Student.class_id == Class.class_id).filter(Class.teacher_id == teacher_id)
+        student_count_query = db.query(func.count(User.user_id)).join(
+            Class, User.profile["class_id"].astext == func.cast(Class.class_id, String)
+        ).filter(Class.teacher_id == teacher_id, User.role == UserRole.STUDENT)
     else:
-        student_count_query = db.query(func.count(Student.student_id)).filter(Student.school_id == school_id)
+        student_count_query = db.query(func.count(User.user_id)).filter(
+            User.school_id == school_id,
+            User.role == UserRole.STUDENT
+        )
     
     assigned_student_count = student_count_query.scalar() or 1
     
@@ -1047,52 +1097,72 @@ async def get_school_activities(
     days: int = Query(30),
     db: Session = Depends(get_db)
 ):
-    """List of activities with completion stats."""
+    """List of activities with completion stats - shows assigned activities from activity engine."""
+    from sqlalchemy import text
+    
     start_date, end_date = get_date_range(days)
+    start_datetime = datetime.combine(start_date, datetime.min.time())
     
-    from app.models.activity import Activity
-    
-    # Base query for activity completion
-    query = db.query(
-        Activity.activity_id,
-        Activity.title,
-        Activity.type,
-        func.count(func.distinct(ActivitySubmission.student_id)).label('completed_count')
-    ).join(ActivityAssignment, Activity.activity_id == ActivityAssignment.activity_id
-    ).join(ActivitySubmission, and_(
-        ActivitySubmission.assignment_id == ActivityAssignment.assignment_id,
-        ActivitySubmission.status.in_([SubmissionStatus.SUBMITTED, SubmissionStatus.VERIFIED]),
-        ActivitySubmission.submitted_at >= datetime.combine(start_date, datetime.min.time())
-    )).join(Class, ActivityAssignment.class_id == Class.class_id)
-
+    # Get class IDs based on filters
     if class_id:
-        query = query.filter(Class.class_id == class_id)
+        class_ids = [class_id]
     elif teacher_id:
-        query = query.filter(Class.teacher_id == teacher_id)
+        class_ids = [c.class_id for c in db.query(Class.class_id).filter(Class.teacher_id == teacher_id).all()]
     else:
-        query = query.filter(Class.school_id == school_id)
-
-    results = query.group_by(Activity.activity_id, Activity.title, Activity.type).all()
+        class_ids = [c.class_id for c in db.query(Class.class_id).filter(Class.school_id == school_id).all()]
     
-    # Get total students assigned
+    if not class_ids:
+        return success_response({"activities": []})
+    
+    # Get total students (only count students, not all users)
     if class_id:
-        student_count_query = db.query(func.count(Student.student_id)).filter(Student.class_id == class_id)
+        student_count = db.query(func.count(User.user_id)).filter(
+            User.profile["class_id"].astext == str(class_id),
+            User.role == UserRole.STUDENT
+        ).scalar() or 1
     elif teacher_id:
-        student_count_query = db.query(func.count(Student.student_id)).join(Class, Student.class_id == Class.class_id).filter(Class.teacher_id == teacher_id)
+        student_count = db.query(func.count(User.user_id)).join(
+            Class, User.profile["class_id"].astext == func.cast(Class.class_id, String)
+        ).filter(Class.teacher_id == teacher_id, User.role == UserRole.STUDENT).scalar() or 1
     else:
-        student_count_query = db.query(func.count(Student.student_id)).filter(Student.school_id == school_id)
+        student_count = db.query(func.count(User.user_id)).filter(
+            User.school_id == school_id,
+            User.role == UserRole.STUDENT
+        ).scalar() or 1
     
-    assigned_student_count = student_count_query.scalar() or 1
+    # Query from assignments with LEFT JOIN to activities table (activity engine)
+    # Removed date filter to show all-time completions
+    class_ids_str = ', '.join([f"'{str(cid)}'" for cid in class_ids])
+    
+    query = text(f"""
+        SELECT 
+            aa.activity_id,
+            COALESCE(a.title, 'Unknown Activity') as title,
+            COALESCE(a.activity_type, 'Activity') as type,
+            COUNT(DISTINCT CASE 
+                WHEN s.status IN ('SUBMITTED', 'VERIFIED') 
+                THEN s.student_id 
+            END) as completed_count
+        FROM b2b_activity_assignments aa
+        LEFT JOIN activities a ON a.activity_id = aa.activity_id
+        LEFT JOIN b2b_activity_submissions s ON s.assignment_id = aa.assignment_id
+        WHERE aa.class_id IN ({class_ids_str})
+        AND aa.status = 'ACTIVE'
+        GROUP BY aa.activity_id, a.title, a.activity_type
+    """)
+    
+    result = db.execute(query)
     
     data = []
-    for row in results:
+    for row in result:
+        completed = row.completed_count or 0
         data.append({
             "id": row.activity_id,
-            "title": row.title,
-            "type": row.type.value if row.type else "Activity",
-            "studentsCompleted": row.completed_count,
-            "totalStudentsAssigned": assigned_student_count,
-            "completionRate": (row.completed_count / assigned_student_count) * 100 if assigned_student_count > 0 else 0
+            "title": row.title or 'Unknown Activity',
+            "type": row.type or 'Activity',
+            "studentsCompleted": completed,
+            "totalStudentsAssigned": student_count,
+            "completionRate": round((completed / student_count) * 100, 1) if student_count > 0 else 0
         })
     
     return success_response({"activities": data})
@@ -1108,8 +1178,6 @@ async def get_school_webinars(
     db: Session = Depends(get_db)
 ):
     """List of webinars with attendance stats."""
-    start_date, end_date = get_date_range(days)
-    start_datetime = datetime.combine(start_date, datetime.min.time())
     
     # Get webinars registered for this school
     registrations = db.query(WebinarSchoolRegistration).filter(
@@ -1119,11 +1187,10 @@ async def get_school_webinars(
     if not registrations:
         return success_response({"webinars": []})
     
-    # Get the actual webinar details
+    # Get the actual webinar details (no date filter - show all registered webinars)
     webinar_ids = [reg.webinar_id for reg in registrations]
     webinars = db.query(Webinar).filter(
-        Webinar.webinar_id.in_(webinar_ids),
-        Webinar.date >= start_datetime
+        Webinar.webinar_id.in_(webinar_ids)
     ).order_by(Webinar.date.desc()).all()
     
     if not webinars:
@@ -1140,16 +1207,20 @@ async def get_school_webinars(
             WebinarSchoolRegistration.school_id == school_id
         ).first()
         
-        # Count students assigned to this webinar
-        students_query = db.query(func.count(Student.student_id)).filter(Student.school_id == school_id)
+        # Count students assigned to this webinar (only students, not all users)
+        students_query = db.query(func.count(User.user_id)).filter(
+            User.school_id == school_id,
+            User.role == UserRole.STUDENT
+        )
         
         # Apply class filter if registration has specific classes
         if reg and reg.class_ids:
-            students_query = students_query.filter(Student.class_id.in_(reg.class_ids))
+            reg_class_ids_str = [str(cid) for cid in reg.class_ids]
+            students_query = students_query.filter(User.profile["class_id"].astext.in_(reg_class_ids_str))
         
         # Apply additional filters from request params
         if class_id:
-            students_query = students_query.filter(Student.class_id == class_id)
+            students_query = students_query.filter(User.profile["class_id"].astext == str(class_id))
         elif teacher_id:
             students_query = students_query.join(Class).filter(Class.teacher_id == teacher_id)
         
@@ -1157,17 +1228,17 @@ async def get_school_webinars(
         
         # Get attendance count for this webinar
         attendance_query = db.query(func.count(StudentWebinarAttendance.id)).join(
-            Student, StudentWebinarAttendance.student_id == Student.student_id
+            User, StudentWebinarAttendance.student_id == User.user_id
         ).filter(
             StudentWebinarAttendance.webinar_id == w.webinar_id,
             StudentWebinarAttendance.attended == True,
-            Student.school_id == school_id
+            User.school_id == school_id
         )
         
         if class_id:
-            attendance_query = attendance_query.filter(Student.class_id == class_id)
+            attendance_query = attendance_query.filter(User.profile["class_id"].astext == str(class_id))
         elif teacher_id:
-            attendance_query = attendance_query.join(Class, Student.class_id == Class.class_id).filter(Class.teacher_id == teacher_id)
+            attendance_query = attendance_query.join(Class, User.profile["class_id"].astext == func.cast(Class.class_id, String)).filter(Class.teacher_id == teacher_id)
         
         attended = attendance_query.scalar() or 0
         
@@ -1175,16 +1246,16 @@ async def get_school_webinars(
         if attended > total_invited:
             # Count unique students who attended but may not be in current assigned list
             historical_attendees = db.query(func.count(func.distinct(StudentWebinarAttendance.student_id))).join(
-                Student, StudentWebinarAttendance.student_id == Student.student_id
+                User, StudentWebinarAttendance.student_id == User.user_id
             ).filter(
                 StudentWebinarAttendance.webinar_id == w.webinar_id,
-                Student.school_id == school_id
+                User.school_id == school_id
             )
             
             if class_id:
-                historical_attendees = historical_attendees.filter(Student.class_id == class_id)
+                historical_attendees = historical_attendees.filter(User.profile["class_id"].astext == str(class_id))
             elif teacher_id:
-                historical_attendees = historical_attendees.join(Class, Student.class_id == Class.class_id).filter(Class.teacher_id == teacher_id)
+                historical_attendees = historical_attendees.join(Class, User.profile["class_id"].astext == func.cast(Class.class_id, String)).filter(Class.teacher_id == teacher_id)
             
             total_invited = max(total_invited, historical_attendees.scalar() or 0)
         
@@ -1219,19 +1290,22 @@ async def get_assessment_details(
         Assessment.school_id == school_id
     ).all()
     
-    assigned_class_ids = [a.class_id for a in assessments if a.class_id]
+    assigned_class_ids = [str(a.class_id) for a in assessments if a.class_id]
     
     # Get all students assigned
-    students_query = db.query(Student).filter(Student.school_id == school_id)
+    students_query = db.query(User).filter(
+        User.school_id == school_id,
+        User.role == UserRole.STUDENT
+    )
     if assigned_class_ids:
-        students_query = students_query.filter(Student.class_id.in_(assigned_class_ids))
+        students_query = students_query.filter(User.profile["class_id"].astext.in_(assigned_class_ids))
     
     students = students_query.all()
-    student_map = {s.student_id: s for s in students}
+    student_map = {s.user_id: s for s in students}
     
     # Get Class names (Fetch ALL classes for the school to ensure map is complete)
     classes = db.query(Class).filter(Class.school_id == school_id).all()
-    class_map = {c.class_id: c.name for c in classes}
+    class_map = {str(c.class_id): c.name for c in classes}
     
     # Get responses
     responses = db.query(StudentResponse).join(Assessment).filter(
@@ -1248,11 +1322,11 @@ async def get_assessment_details(
     
     # We already have 'students' from the assignment query. 
     # Let's fetch the student objects for any responder who isn't in 'students' yet.
-    existing_student_ids = set(s.student_id for s in students)
+    existing_student_ids = set(s.user_id for s in students)
     missing_ids = responding_student_ids - existing_student_ids
     
     if missing_ids:
-        missing_students = db.query(Student).filter(Student.student_id.in_(missing_ids)).all()
+        missing_students = db.query(User).filter(User.user_id.in_(missing_ids)).all()
         students.extend(missing_students)
         # Update map? No need, we iterate 'students' loop.
     
@@ -1294,18 +1368,18 @@ async def get_assessment_details(
     score_dist = {f"{i*10}-{(i+1)*10}": 0 for i in range(10)} # 0-10, 10-20...
 
     for s in students:
-        resp = response_map.get(s.student_id)
-        resp = response_map.get(s.student_id)
+        resp = response_map.get(s.user_id)
         status = "submitted" if resp else "pending"
         score = resp.score if resp else 0
         
-        c_name = class_map.get(s.class_id, "Unknown Class")
+        class_id_str = s.profile.get("class_id") if s.profile else None
+        c_name = class_map.get(class_id_str, "Unknown Class")
         
         # Update Class Stats
-        if s.class_id not in class_stats:
-            class_stats[s.class_id] = {"className": c_name, "total": 0, "submitted": 0, "total_score": 0}
+        if class_id_str not in class_stats:
+            class_stats[class_id_str] = {"className": c_name, "total": 0, "submitted": 0, "total_score": 0}
         
-        class_stats[s.class_id]["total"] += 1
+        class_stats[class_id_str]["total"] += 1
 
         if resp:
             total_score += score
@@ -1313,8 +1387,8 @@ async def get_assessment_details(
             if (score / max_score) >= 0.6:
                 pass_count += 1
             
-            class_stats[s.class_id]["submitted"] += 1
-            class_stats[s.class_id]["total_score"] += score
+            class_stats[class_id_str]["submitted"] += 1
+            class_stats[class_id_str]["total_score"] += score
             
             # Score Distribution
             normalized_score = (score / max_score) * 100 if max_score > 0 else 0
@@ -1363,8 +1437,8 @@ async def get_assessment_details(
                             stats["option_counts"][key] = stats["option_counts"].get(key, 0) + 1
         
         submissions.append({
-            "studentId": str(s.student_id), # Ensure string ID
-            "studentName": f"{s.first_name} {s.last_name}",
+            "studentId": str(s.user_id), # Ensure string ID
+            "studentName": s.display_name,
             "className": c_name,
             "status": status,
             "score": score,
@@ -1472,15 +1546,16 @@ async def get_student_assessment_responses(
         raise HTTPException(status_code=404, detail="Assessment not found")
     
     # Get student info
-    student = db.query(Student).filter(
-        Student.student_id == student_id,
-        Student.school_id == school_id
+    student = db.query(User).filter(
+        User.user_id == student_id,
+        User.school_id == school_id
     ).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     
-    # Get student's class info
-    class_info = db.query(Class).filter(Class.class_id == student.class_id).first()
+    # Get student's class info from profile
+    class_id_str = student.profile.get("class_id") if student.profile else None
+    class_info = db.query(Class).filter(Class.class_id == class_id_str).first() if class_id_str else None
     class_name = class_info.name if class_info else "Unknown Class"
     
     # Get student's responses
@@ -1494,7 +1569,7 @@ async def get_student_assessment_responses(
         return success_response({
             "student": {
                 "id": str(student_id),
-                "name": f"{student.first_name} {student.last_name}",
+                "name": student.display_name,
                 "className": class_name
             },
             "assessment": {
@@ -1576,7 +1651,7 @@ async def get_student_assessment_responses(
     return success_response({
         "student": {
             "id": str(student_id),
-            "name": f"{student.first_name} {student.last_name}",
+            "name": student.display_name,
             "className": class_name
         },
         "assessment": {
@@ -1601,14 +1676,15 @@ async def get_student_profile(
     """Get comprehensive student profile analytics."""
     
     # 1. Student Basic Info
-    student = db.query(Student).filter(
-        Student.student_id == student_id,
-        Student.school_id == school_id
+    student = db.query(User).filter(
+        User.user_id == student_id,
+        User.school_id == school_id
     ).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
-        
-    class_info = db.query(Class).filter(Class.class_id == student.class_id).first()
+    
+    class_id_str = student.profile.get("class_id") if student.profile else None
+    class_info = db.query(Class).filter(Class.class_id == class_id_str).first() if class_id_str else None
     class_name = class_info.name if class_info else "Unknown Class"
     
     # 2. Risk Alerts (Last 30 days)
@@ -1665,27 +1741,37 @@ async def get_student_profile(
     assessments_list.sort(key=lambda x: x["submittedAt"] or datetime.min, reverse=True)
     
     # 4. Activity History
-    activity_submissions = db.query(ActivitySubmission).join(ActivityAssignment).join(Activity).filter(
+    activity_submissions = db.query(ActivitySubmission).join(ActivityAssignment).filter(
         ActivitySubmission.student_id == student_id
     ).options(
-        joinedload(ActivitySubmission.assignment).joinedload(ActivityAssignment.activity)
+        joinedload(ActivitySubmission.assignment)
     ).all()
     
     print(f"DEBUG: Fetched {len(activity_submissions)} activity submissions for student {student_id}")
 
+    # Collect activity IDs to batch fetch
+    activity_ids = [sub.assignment.activity_id for sub in activity_submissions if sub.assignment]
+    activities_map = {}
+    if activity_ids:
+        activities = db.query(ActivityEngine).filter(ActivityEngine.activity_id.in_(activity_ids)).all()
+        activities_map = {str(a.activity_id): a for a in activities}
+
     activities_list = []
     for sub in activity_submissions:
-        # Check if assignment/activity exists (safe navigation)
-        if sub.assignment and sub.assignment.activity:
-             activities_list.append({
-                 "id": str(sub.submission_id),
-                 "title": sub.assignment.activity.title,
-                 "type": sub.assignment.activity.type, 
-                 "submittedAt": sub.submitted_at.isoformat() if sub.submitted_at else sub.created_at.isoformat(),
-                 "status": sub.status,
-                 "feedback": sub.feedback,
-                 "fileUrl": sub.file_url 
-             })
+        if sub.assignment:
+            activity = activities_map.get(str(sub.assignment.activity_id))
+            activity_title = activity.title if activity else f"Activity {sub.assignment.activity_id}"
+            activity_type = (activity.activity_type if activity else "activity") or "activity"
+            
+            activities_list.append({
+                "id": str(sub.submission_id),
+                "title": activity_title,
+                "type": activity_type, 
+                "submittedAt": sub.submitted_at.isoformat() if sub.submitted_at else sub.created_at.isoformat(),
+                "status": sub.status,
+                "feedback": sub.feedback,
+                "fileUrl": sub.file_url 
+            })
     
     # 5. Webinar History
     webinar_attendance = db.query(StudentWebinarAttendance).join(Webinar).filter(
@@ -1728,8 +1814,8 @@ async def get_student_profile(
 
     # 7. Calculate Activity Completion %
     total_assignments_count = db.query(ActivityAssignment).filter(
-        ActivityAssignment.class_id == student.class_id
-    ).count()
+        ActivityAssignment.class_id == class_id_str
+    ).count() if class_id_str else 0
     
     activities_completed_count = len(activities_list) # Submissions
     activity_completion_rate = 0
@@ -1819,22 +1905,28 @@ async def get_student_profile(
         })
 
     # Alerts already formatted above
+    
+    # Get profile data for student-specific fields
+    roll_number = student.profile.get("roll_number") if student.profile else None
+    parent_email = student.profile.get("parent_email") if student.profile else None
+    parent_phone = student.profile.get("parent_phone") if student.profile else None
+    dob = student.profile.get("dob") if student.profile else None
 
     return success_response({
-        "id": str(student.student_id),
-        "name": f"{student.first_name} {student.last_name}",
+        "id": str(student.user_id),
+        "name": student.display_name,
         "class": class_name,
         "section": "A", # Mock section if not in class name
-        "rollNumber": student.roll_number or "N/A",
+        "rollNumber": roll_number or "N/A",
         "rank": f"#{1}", # Mock rank
         "totalStudents": 1250, # Mock total
         "avatar": None,
-        "email": student.parent_email or f"{student.first_name.lower()}.{student.last_name.lower()}@school.edu",
+        "email": parent_email or student.email or "student@school.edu",
         "phone": "+1 (555) 123-4567", # Mock student phone
-        "dob": student.dob.isoformat() if student.dob else "2012-05-15",
+        "dob": dob or "2012-05-15",
         "joined": "2023-09-01", # Mock joined date
         "parentName": "Parent Guardian", # Mock name
-        "parentContact": student.parent_phone or "+1 (555) 987-6543",
+        "parentContact": parent_phone or "+1 (555) 987-6543",
         "stats": {
             "engagementScore": engagement_score,
             "attendanceRate": 100, # Mock match screenshot. (Calc properly if needed: attended/total_webinars * 100)
@@ -1871,10 +1963,10 @@ async def get_activity_details(
     db: Session = Depends(get_db)
 ):
     """Detailed view of a specific activity."""
-    from app.models.activity import Activity # Import here
+    from app.models.activity_engine import ActivityEngine
     start_date, end_date = get_date_range(days)
 
-    activity = db.query(Activity).filter(Activity.activity_id == activity_id).first()
+    activity = db.query(ActivityEngine).filter(ActivityEngine.activity_id == str(activity_id)).first()
     if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
         
@@ -1884,11 +1976,14 @@ async def get_activity_details(
         Class.school_id == school_id
     ).all()
     
-    assigned_class_ids = [a.class_id for a in assignments]
+    assigned_class_ids = [str(a.class_id) for a in assignments]
     
-    students_query = db.query(Student).filter(Student.school_id == school_id)
+    students_query = db.query(User).filter(
+        User.school_id == school_id,
+        User.role == UserRole.STUDENT
+    )
     if assigned_class_ids:
-        students_query = students_query.filter(Student.class_id.in_(assigned_class_ids))
+        students_query = students_query.filter(User.profile["class_id"].astext.in_(assigned_class_ids))
         
     students = students_query.all()
     
@@ -1904,15 +1999,15 @@ async def get_activity_details(
     completed_count = 0
     
     for s in students:
-        sub = sub_map.get(s.student_id)
+        sub = sub_map.get(s.user_id)
         status = sub.status.value.lower() if sub else "pending"
         
         if status in ["submitted", "verified"]:
             completed_count += 1
             
         completions.append({
-            "studentId": s.student_id,
-            "studentName": f"{s.first_name} {s.last_name}",
+            "studentId": s.user_id,
+            "studentName": s.display_name,
             "status": status,
             "submittedAt": sub.submitted_at.isoformat() if sub and sub.submitted_at else None
         })
@@ -1920,7 +2015,7 @@ async def get_activity_details(
     return success_response({
         "id": activity_id,
         "title": activity.title,
-        "type": activity.type.value if activity.type else "Activity",
+        "type": activity.activity_type or "Activity",
         "totalStudentsAssigned": len(students),
         "studentsCompleted": completed_count,
         "studentsPending": len(students) - completed_count,
@@ -1948,34 +2043,38 @@ async def get_webinar_details(
     # Get all attendance records for this webinar from this school first
     # This ensures we include students who attended but may have changed classes
     attendance_records = db.query(StudentWebinarAttendance).options(
-        joinedload(StudentWebinarAttendance.student).joinedload(Student.class_obj)
-    ).join(Student).filter(
+        joinedload(StudentWebinarAttendance.student).joinedload(User.school)
+    ).join(User, StudentWebinarAttendance.student_id == User.user_id).filter(
         StudentWebinarAttendance.webinar_id == webinar_id,
-        Student.school_id == school_id
+        User.school_id == school_id
     ).all()
     
     # Get student IDs from attendance records
     attended_student_ids = {att.student_id for att in attendance_records}
     
     # Get all students that should be invited based on registration
-    students_query = db.query(Student).options(
-        joinedload(Student.class_obj)
-    ).filter(Student.school_id == school_id)
+    students_query = db.query(User).options(
+        joinedload(User.school)
+    ).filter(
+        User.school_id == school_id,
+        User.role == UserRole.STUDENT
+    )
     
     # Filter by assigned classes if registration specifies specific classes
     if registration and registration.class_ids:
-        students_query = students_query.filter(Student.class_id.in_(registration.class_ids))
+        reg_class_ids_str = [str(cid) for cid in registration.class_ids]
+        students_query = students_query.filter(User.profile["class_id"].astext.in_(reg_class_ids_str))
     
     currently_assigned_students = students_query.all()
-    currently_assigned_ids = {s.student_id for s in currently_assigned_students}
+    currently_assigned_ids = {s.user_id for s in currently_assigned_students}
     
     # Combine both sets: currently assigned + anyone who attended (to avoid attended > total)
     all_student_ids = currently_assigned_ids | attended_student_ids
     
     # Fetch all students we need to show
-    all_students = db.query(Student).options(
-        joinedload(Student.class_obj)
-    ).filter(Student.student_id.in_(all_student_ids)).all()
+    all_students = db.query(User).options(
+        joinedload(User.school)
+    ).filter(User.user_id.in_(all_student_ids)).all()
     
     # Create a map of student_id -> attendance record
     attendance_map = {att.student_id: att for att in attendance_records}
@@ -1986,7 +2085,7 @@ async def get_webinar_details(
     
     for student in all_students:
         # Get attendance record if exists
-        att = attendance_map.get(student.student_id)
+        att = attendance_map.get(student.user_id)
         
         # Determine status based on attendance record
         if att:
@@ -2005,16 +2104,18 @@ async def get_webinar_details(
             duration = None
             watch_percentage = 0
         
-        # Get class info
-        class_name = student.class_obj.name if student.class_obj else "Unassigned"
-        class_id = str(student.class_id) if student.class_id else None
+        # Get class info from profile
+        class_id_str = student.profile.get("class_id") if student.profile else None
+        class_info = db.query(Class).filter(Class.class_id == class_id_str).first() if class_id_str else None
+        class_name = class_info.name if class_info else "Unassigned"
+        roll_number = student.profile.get("roll_number") if student.profile else None
         
         attendance_list.append({
-            "studentId": str(student.student_id),
-            "studentName": f"{student.first_name} {student.last_name}",
-            "rollNumber": student.roll_number or "",
+            "studentId": str(student.user_id),
+            "studentName": student.display_name,
+            "rollNumber": roll_number or "",
             "className": class_name,
-            "classId": class_id,
+            "classId": class_id_str,
             "status": status,
             "attended": attended,
             "joinTime": join_time,
@@ -2098,49 +2199,61 @@ async def get_school_leaderboard(
     offset = (page - 1) * limit
     
     # Base student query for this school
-    students = db.query(Student).filter(Student.school_id == school_id).all()
-    student_map = {s.student_id: s for s in students}
+    students = db.query(User).filter(
+        User.school_id == school_id,
+        User.role == UserRole.STUDENT
+    ).all()
+    student_map = {s.user_id: s for s in students}
     student_ids = list(student_map.keys())
     
     if not student_ids:
         return success_response({"students": [], "total": 0, "page": page, "limit": limit})
 
     # Get Class names
-    class_ids = list(set([s.class_id for s in students if s.class_id]))
+    class_ids = list(set([s.profile.get("class_id") for s in students if s.profile and s.profile.get("class_id")]))
     class_map = {}
     if class_ids:
         classes = db.query(Class).filter(Class.class_id.in_(class_ids)).all()
-        class_map = {c.class_id: c.name for c in classes}
+        class_map = {str(c.class_id): c.name for c in classes}
 
     results = []
     total_count = 0
 
     if type == "assessments":
-        # Rank by Avg Score
+        # Rank by Avg Score - try with date filter first, then without if no results
         base_query = db.query(
             StudentResponse.student_id,
             func.avg(StudentResponse.score).label('score'),
             func.count(func.distinct(StudentResponse.assessment_id)).label('count')
         ).filter(
             StudentResponse.student_id.in_(student_ids),
-            StudentResponse.completed_at >= start_datetime
+            StudentResponse.completed_at.isnot(None)
         ).group_by(StudentResponse.student_id)
         
-        total_count = base_query.count()
-        data = base_query.order_by(desc('score')).offset(offset).limit(limit).all()
+        # Try with date filter first
+        dated_query = base_query.filter(StudentResponse.completed_at >= start_datetime)
+        total_count = dated_query.count()
+        
+        # If no results with date filter, use all-time data
+        if total_count == 0:
+            total_count = base_query.count()
+            data = base_query.order_by(desc('score')).offset(offset).limit(limit).all()
+        else:
+            data = dated_query.order_by(desc('score')).offset(offset).limit(limit).all()
         
         for row in data:
             s = student_map.get(row.student_id)
             if s:
+                class_id_str = s.profile.get("class_id") if s.profile else None
                 results.append({
-                    "id": str(s.student_id),
-                    "name": f"{s.first_name} {s.last_name}",
-                    "className": class_map.get(s.class_id, "Unknown"),
+                    "id": str(s.user_id),
+                    "name": s.display_name,
+                    "className": class_map.get(class_id_str, "Unknown"),
                     "score": round(row.score, 1) if row.score else 0,
                     "scoreLabel": "Avg Score",
                     "secondaryScore": row.count,
                     "secondaryLabel": "Assessments",
-                    "riskLevel": s.risk_level.value.lower() if s.risk_level else "low",
+                    "riskLevel": (s.profile.get("risk_level") or "low").lower() if s.profile else "low",
                     "avatar": None
                 })
 
@@ -2151,23 +2264,31 @@ async def get_school_leaderboard(
             func.count(ActivitySubmission.submission_id).label('count')
         ).filter(
             ActivitySubmission.student_id.in_(student_ids),
-            ActivitySubmission.status.in_([SubmissionStatus.SUBMITTED, SubmissionStatus.VERIFIED]),
-            ActivitySubmission.submitted_at >= start_datetime
+            ActivitySubmission.status.in_([SubmissionStatus.SUBMITTED, SubmissionStatus.VERIFIED])
         ).group_by(ActivitySubmission.student_id)
         
-        total_count = base_query.count()
-        data = base_query.order_by(desc('count')).offset(offset).limit(limit).all()
+        # Try with date filter first
+        dated_query = base_query.filter(ActivitySubmission.submitted_at >= start_datetime)
+        total_count = dated_query.count()
+        
+        # If no results with date filter, use all-time data
+        if total_count == 0:
+            total_count = base_query.count()
+            data = base_query.order_by(desc('count')).offset(offset).limit(limit).all()
+        else:
+            data = dated_query.order_by(desc('count')).offset(offset).limit(limit).all()
         
         for row in data:
             s = student_map.get(row.student_id)
             if s:
+                class_id_str = s.profile.get("class_id") if s.profile else None
                 results.append({
-                    "id": str(s.student_id),
-                    "name": f"{s.first_name} {s.last_name}",
-                    "className": class_map.get(s.class_id, "Unknown"),
+                    "id": str(s.user_id),
+                    "name": s.display_name,
+                    "className": class_map.get(class_id_str, "Unknown"),
                     "score": row.count,
                     "scoreLabel": "Activities Completed",
-                    "riskLevel": s.risk_level.value.lower() if s.risk_level else "low",
+                    "riskLevel": (s.profile.get("risk_level") or "low").lower() if s.profile else "low",
                     "avatar": None
                 })
 
@@ -2178,23 +2299,31 @@ async def get_school_leaderboard(
             func.count(StudentWebinarAttendance.id).label('count')
         ).filter(
             StudentWebinarAttendance.student_id.in_(student_ids),
-            StudentWebinarAttendance.attended == True,
-            StudentWebinarAttendance.created_at >= start_datetime
+            StudentWebinarAttendance.attended == True
         ).group_by(StudentWebinarAttendance.student_id)
         
-        total_count = base_query.count()
-        data = base_query.order_by(desc('count')).offset(offset).limit(limit).all()
+        # Try with date filter first
+        dated_query = base_query.filter(StudentWebinarAttendance.created_at >= start_datetime)
+        total_count = dated_query.count()
+        
+        # If no results with date filter, use all-time data
+        if total_count == 0:
+            total_count = base_query.count()
+            data = base_query.order_by(desc('count')).offset(offset).limit(limit).all()
+        else:
+            data = dated_query.order_by(desc('count')).offset(offset).limit(limit).all()
         
         for row in data:
             s = student_map.get(row.student_id)
             if s:
+                class_id_str = s.profile.get("class_id") if s.profile else None
                 results.append({
-                    "id": str(s.student_id),
-                    "name": f"{s.first_name} {s.last_name}",
-                    "className": class_map.get(s.class_id, "Unknown"),
+                    "id": str(s.user_id),
+                    "name": s.display_name,
+                    "className": class_map.get(class_id_str, "Unknown"),
                     "score": row.count,
                     "scoreLabel": "Webinars Attended",
-                    "riskLevel": s.risk_level.value.lower() if s.risk_level else "low",
+                    "riskLevel": (s.profile.get("risk_level") or "low").lower() if s.profile else "low",
                     "avatar": None
                 })
 

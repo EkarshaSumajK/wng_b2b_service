@@ -13,7 +13,7 @@ from app.core.database import get_db
 from app.core.response import success_response
 from app.core.logging_config import get_logger
 from app.models.webinar import Webinar, WebinarStatus, WebinarSchoolRegistration, RegistrationType, RegistrationStatus
-from app.models.student import Student
+from app.models.user import User, UserRole
 from app.models.class_model import Class
 from app.models.school import School
 from app.models.user import User
@@ -35,13 +35,29 @@ async def get_webinars_analytics(
     limit: int = 20,
     db: Session = Depends(get_db)
 ):
-    """Get all webinars with attendance analytics."""
+    """Get webinars with attendance analytics - only shows webinars registered by the school."""
     start_date = datetime.utcnow() - timedelta(days=days)
     
-    query = db.query(Webinar)
-    
+    # If school_id provided, only show webinars the school has registered for
     if school_id:
-        query = query.filter(or_(Webinar.school_id == school_id, Webinar.school_id.is_(None)))
+        # Get webinar IDs that this school has registered for
+        registered_webinar_ids = db.query(WebinarSchoolRegistration.webinar_id).filter(
+            WebinarSchoolRegistration.school_id == school_id
+        ).all()
+        registered_ids = [r.webinar_id for r in registered_webinar_ids]
+        
+        if not registered_ids:
+            return success_response({
+                "total": 0,
+                "skip": skip,
+                "limit": limit,
+                "webinars": []
+            })
+        
+        query = db.query(Webinar).filter(Webinar.webinar_id.in_(registered_ids))
+    else:
+        # No school filter - show all webinars (admin view)
+        query = db.query(Webinar)
     
     if status:
         try:
@@ -333,9 +349,9 @@ async def get_webinar_analytics(
                 class_stats = db.query(
                     func.count(StudentWebinarAttendance.id).label('invited'),
                     func.sum(case((StudentWebinarAttendance.attended == True, 1), else_=0)).label('attended')
-                ).join(Student, StudentWebinarAttendance.student_id == Student.student_id).filter(
+                ).join(Student, StudentWebinarAttendance.student_id == User.user_id).filter(
                     StudentWebinarAttendance.webinar_id == webinar_id,
-                    Student.class_id == class_id
+                    User.profile["class_id"].astext == str(class_id)
                 ).first()
                 
                 class_breakdown.append({
@@ -427,7 +443,7 @@ async def get_webinar_participants(
         query = query.filter(StudentWebinarAttendance.attended == attended)
     
     if class_id:
-        query = query.join(Student).filter(Student.class_id == class_id)
+        query = query.join(Student).filter(User.profile["class_id"].astext == str(class_id))
     
     if search:
         query = query.join(Student).filter(or_(
@@ -440,7 +456,7 @@ async def get_webinar_participants(
     
     # Get class names
     student_ids = [a.student_id for a in attendances]
-    students = db.query(Student).filter(Student.student_id.in_(student_ids)).all()
+    students = db.query(User).filter(User.user_id.in_(student_ids)).all()
     student_map = {s.student_id: s for s in students}
     
     class_ids = list(set(s.class_id for s in students if s.class_id))
@@ -454,7 +470,7 @@ async def get_webinar_participants(
             
             participants.append({
                 "student_id": att.student_id,
-                "student_name": f"{student.first_name} {student.last_name}",
+                "student_name": student.display_name,
                 "class_id": student.class_id,
                 "class_name": class_names.get(student.class_id),
                 "grade": student.grade,
@@ -500,10 +516,11 @@ async def assign_webinar_to_classes(
     webinar.target_grades = grades
     
     # Get target students
-    student_query = db.query(Student).filter(Student.school_id == school_id)
+    student_query = db.query(User).filter(User.school_id == school_id)
     
     if class_ids:
-        student_query = student_query.filter(Student.class_id.in_(class_ids))
+        class_ids_str = [str(cid) for cid in class_ids]
+        student_query = student_query.filter(User.profile["class_id"].astext.in_(class_ids_str))
     elif grades:
         student_query = student_query.filter(Student.grade.in_(grades))
     
@@ -518,10 +535,10 @@ async def assign_webinar_to_classes(
     
     created = 0
     for student in students:
-        if student.student_id not in existing:
+        if student.user_id not in existing:
             db.add(StudentWebinarAttendance(
                 webinar_id=webinar_id,
-                student_id=student.student_id,
+                student_id=student.user_id,
                 attended=False
             ))
             created += 1
@@ -567,7 +584,7 @@ async def get_school_webinar_summary(
         })
     
     # Get student IDs for this school
-    student_ids = [s[0] for s in db.query(Student.student_id).filter(Student.school_id == school_id).all()]
+    student_ids = [s[0] for s in db.query(User.user_id).filter(User.school_id == school_id).all()]
     
     # Overall stats
     stats = db.query(
@@ -670,11 +687,12 @@ async def register_webinar(
     reg_type = RegistrationType.CLASS if request.registration_type == "class" else RegistrationType.SCHOOL
     
     # Get target students
-    student_query = db.query(Student).filter(Student.school_id == school_id)
+    student_query = db.query(User).filter(User.school_id == school_id)
     
     if reg_type == RegistrationType.CLASS:
         if request.class_ids:
-            student_query = student_query.filter(Student.class_id.in_(request.class_ids))
+            class_ids_str = [str(cid) for cid in request.class_ids]
+            student_query = student_query.filter(User.profile["class_id"].astext.in_(class_ids_str))
         if request.grade_ids:
             student_query = student_query.filter(Student.grade.in_(request.grade_ids))
     
@@ -707,10 +725,10 @@ async def register_webinar(
     # Create attendance records for students (skip existing)
     new_records = 0
     for student in students:
-        if student.student_id not in existing_attendance:
+        if student.user_id not in existing_attendance:
             db.add(StudentWebinarAttendance(
                 webinar_id=webinar_id,
-                student_id=student.student_id,
+                student_id=student.user_id,
                 attended=False
             ))
             new_records += 1
@@ -769,9 +787,9 @@ async def get_webinar_class_breakdown(
         })
     
     # Get students with their classes
-    students = db.query(Student).filter(
-        Student.student_id.in_(student_ids),
-        Student.school_id == school_id
+    students = db.query(User).filter(
+        User.user_id.in_(student_ids),
+        User.school_id == school_id
     ).all()
     
     # Group by class
@@ -811,7 +829,7 @@ async def get_webinar_class_breakdown(
         student_details = []
         
         for student in class_student_list:
-            att = attendance_map.get(student.student_id)
+            att = attendance_map.get(student.user_id)
             if att:
                 watch_pct = round(att.watch_duration_minutes / webinar.duration_minutes * 100, 1) if att.watch_duration_minutes and webinar.duration_minutes else 0
                 
@@ -822,8 +840,8 @@ async def get_webinar_class_breakdown(
                         completed_count += 1
                 
                 student_details.append({
-                    "student_id": student.student_id,
-                    "student_name": f"{student.first_name} {student.last_name}",
+                    "student_id": student.user_id,
+                    "student_name": student.display_name,
                     "attended": att.attended,
                     "watch_duration_minutes": att.watch_duration_minutes,
                     "watch_percentage": watch_pct,
@@ -874,7 +892,7 @@ async def unregister_webinar(
         raise HTTPException(status_code=404, detail="NOT_REGISTERED")
     
     # Get student IDs for this school
-    student_ids = [s[0] for s in db.query(Student.student_id).filter(Student.school_id == school_id).all()]
+    student_ids = [s[0] for s in db.query(User.user_id).filter(User.school_id == school_id).all()]
     
     # Delete attendance records
     deleted = db.query(StudentWebinarAttendance).filter(
@@ -929,14 +947,14 @@ async def assign_webinar_enhanced(
             Class.class_id.in_(class_ids),
             Class.school_id == school_id
         ).all()
-        valid_class_ids = [c.class_id for c in valid_classes]
+        valid_class_ids = [str(c.class_id) for c in valid_classes]
     
     # Get target students
-    student_query = db.query(Student).filter(Student.school_id == school_id)
+    student_query = db.query(User).filter(User.school_id == school_id)
     
     if assignment_type == "class":
         if valid_class_ids:
-            student_query = student_query.filter(Student.class_id.in_(valid_class_ids))
+            student_query = student_query.filter(User.profile["class_id"].astext.in_(valid_class_ids))
         if grades:
             student_query = student_query.filter(Student.grade.in_(grades))
     
@@ -967,10 +985,10 @@ async def assign_webinar_enhanced(
     
     new_records = 0
     for student in students:
-        if student.student_id not in existing_student_ids:
+        if student.user_id not in existing_student_ids:
             db.add(StudentWebinarAttendance(
                 webinar_id=webinar_id,
-                student_id=student.student_id,
+                student_id=student.user_id,
                 attended=False
             ))
             new_records += 1

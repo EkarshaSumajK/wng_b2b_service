@@ -69,9 +69,13 @@ class CaseResponse(BaseModel):
         }
 
 class StudentInfo(BaseModel):
-    student_id: UUID
-    first_name: str
-    last_name: str
+    student_id: Optional[UUID] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    display_name: Optional[str] = None
+    email: Optional[str] = None
+    school_id: Optional[UUID] = None
+    # Legacy fields (from old Student model - kept for backward compatibility)
     gender: Optional[Gender] = None
     class_id: Optional[UUID] = None
     class_name: Optional[str] = None
@@ -134,10 +138,9 @@ class CaseDetailResponse(BaseModel):
                     "student_id": "123e4567-e89b-12d3-a456-426614174007",
                     "first_name": "Ethan",
                     "last_name": "Lopez",
-                    "gender": "male",
-                    "class_id": "8f3c4567-e89b-12d3-a456-426614174033",
-                    "class_name": "Grade 8-A",
-                    "parents_id": ["9a2b3c4d-e89b-12d3-a456-426614174045", "9a2b3c4d-e89b-12d3-a456-426614174046"]
+                    "display_name": "Ethan Lopez",
+                    "email": "ethan.lopez@school.edu",
+                    "school_id": "8f3c4567-e89b-12d3-a456-426614174033"
                 },
                 "teacher": {
                     "user_id": "abc12345-e89b-12d3-a456-426614174055",
@@ -157,12 +160,6 @@ class CaseDetailResponse(BaseModel):
                         "display_name": "Maria Lopez",
                         "email": "maria.lopez@email.com",
                         "phone": "+1-555-0189"
-                    },
-                    {
-                        "user_id": "9a2b3c4d-e89b-12d3-a456-426614174046",
-                        "display_name": "Carlos Lopez",
-                        "email": "carlos.lopez@email.com",
-                        "phone": "+1-555-0190"
                     }
                 ]
             }

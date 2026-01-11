@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func, case as sql_case
+from sqlalchemy import func, case as sql_case, String
 from typing import List, Optional
 from uuid import UUID
 from datetime import datetime, timedelta
@@ -9,7 +9,6 @@ from app.core.database import get_db
 from app.core.response import success_response
 from app.core.logging_config import get_logger
 from app.models.user import User, UserRole
-from app.models.student import Student
 from app.models.case import Case, CaseStatus, RiskLevel
 from app.models.observation import Observation
 from app.models.assessment import Assessment
@@ -111,7 +110,7 @@ async def get_school_overview(
     """Get comprehensive school overview dashboard"""
     
     # 1. Total counts (Optimized: Single queries)
-    total_students = db.query(Student).filter(Student.school_id == school_id).count()
+    total_students = db.query(User).filter(User.school_id == school_id, User.role == UserRole.STUDENT).count()
     total_classes = db.query(Class).filter(Class.school_id == school_id).count()
     total_teachers = db.query(User).filter(
         User.school_id == school_id,
@@ -141,8 +140,8 @@ async def get_school_overview(
         func.sum(sql_case(
             ((Case.risk_level == RiskLevel.LOW) & (Case.status != CaseStatus.CLOSED), 1), else_=0
         )).label('low')
-    ).join(Student, Case.student_id == Student.student_id)\
-     .filter(Student.school_id == school_id).first()
+    ).join(User, Case.student_id == User.user_id)\
+     .filter(User.school_id == school_id, User.role == UserRole.STUDENT).first()
 
     total_cases = case_stats.total or 0
     active_cases = case_stats.active or 0
@@ -155,9 +154,10 @@ async def get_school_overview(
     thirty_days_ago = datetime.utcnow() - timedelta(days=30)
     
     recent_observations = db.query(func.count(Observation.observation_id))\
-        .join(Student, Observation.student_id == Student.student_id)\
+        .join(User, Observation.student_id == User.user_id)\
         .filter(
-            Student.school_id == school_id,
+            User.school_id == school_id,
+            User.role == UserRole.STUDENT,
             Observation.timestamp >= thirty_days_ago
         ).scalar() or 0
 
@@ -166,9 +166,10 @@ async def get_school_overview(
     
     # Recent assessments count
     recent_assessments_count = db.query(func.count(func.distinct(StudentResponse.assessment_id)))\
-        .join(Student, StudentResponse.student_id == Student.student_id)\
+        .join(User, StudentResponse.student_id == User.user_id)\
         .filter(
-            Student.school_id == school_id,
+            User.school_id == school_id,
+            User.role == UserRole.STUDENT,
             StudentResponse.completed_at >= thirty_days_ago
         ).scalar() or 0
         
@@ -177,9 +178,10 @@ async def get_school_overview(
         func.count(StudentResponse.response_id).label('total_responses'),
         func.count(func.distinct(StudentResponse.student_id)).label('students_assessed'),
         func.avg(StudentResponse.score).label('avg_score')
-    ).join(Student, StudentResponse.student_id == Student.student_id)\
+    ).join(User, StudentResponse.student_id == User.user_id)\
      .filter(
-         Student.school_id == school_id,
+         User.school_id == school_id,
+         User.role == UserRole.STUDENT,
          StudentResponse.completed_at.isnot(None)
      ).first()
      
@@ -196,8 +198,8 @@ async def get_school_overview(
     ).select_from(StudentResponse)\
      .join(Assessment, StudentResponse.assessment_id == Assessment.assessment_id)\
      .join(AssessmentTemplate, Assessment.template_id == AssessmentTemplate.template_id)\
-     .join(Student, StudentResponse.student_id == Student.student_id)\
-     .filter(Student.school_id == school_id, StudentResponse.completed_at.isnot(None))\
+     .join(User, StudentResponse.student_id == User.user_id)\
+     .filter(User.school_id == school_id, User.role == UserRole.STUDENT, StudentResponse.completed_at.isnot(None))\
      .group_by(AssessmentTemplate.category).all()
      
     category_breakdown = [
@@ -215,9 +217,9 @@ async def get_school_overview(
         func.count(StudentResponse.response_id).label('count'),
         func.avg(StudentResponse.score).label('avg_score')
     ).select_from(StudentResponse)\
-     .join(Student, StudentResponse.student_id == Student.student_id)\
-     .join(Class, Student.class_id == Class.class_id)\
-     .filter(Student.school_id == school_id, StudentResponse.completed_at.isnot(None))\
+     .join(Student, StudentResponse.student_id == User.user_id)\
+     .join(Class, User.profile["class_id"].astext == func.cast(Class.class_id, String))\
+     .filter(User.school_id == school_id, StudentResponse.completed_at.isnot(None))\
      .group_by(Class.grade).all()
      
     grade_breakdown = [
@@ -251,8 +253,8 @@ async def get_school_overview(
             (StudentResponse.completed_at >= thirty_days_ago, 1),
             else_=None
         )).label('curr_count')
-    ).join(Student, StudentResponse.student_id == Student.student_id)\
-     .filter(Student.school_id == school_id).first()
+    ).join(Student, StudentResponse.student_id == User.user_id)\
+     .filter(User.school_id == school_id).first()
      
     previous_avg = float(trend_stats.prev_avg or 0)
     recent_avg = float(trend_stats.curr_avg or 0)
@@ -277,16 +279,16 @@ async def get_school_overview(
         func.date_trunc('month', Case.created_at).label('month'),
         func.count(Case.case_id).label('opened'),
         func.count(Case.closed_at).label('closed') # This is approximate as closed_at might be in different month
-    ).join(Student, Case.student_id == Student.student_id)\
-     .filter(Student.school_id == school_id, Case.created_at >= six_months_ago)\
+    ).join(Student, Case.student_id == User.user_id)\
+     .filter(User.school_id == school_id, Case.created_at >= six_months_ago)\
      .group_by(text('1')).all()
      
     # Better approach for closed cases: group by closed_at
     cases_closed_trend = db.query(
         func.date_trunc('month', Case.closed_at).label('month'),
         func.count(Case.case_id).label('closed')
-    ).join(Student, Case.student_id == Student.student_id)\
-     .filter(Student.school_id == school_id, Case.closed_at >= six_months_ago)\
+    ).join(Student, Case.student_id == User.user_id)\
+     .filter(User.school_id == school_id, Case.closed_at >= six_months_ago)\
      .group_by(text('1')).all()
 
     # Group Assessments by Month
@@ -294,8 +296,8 @@ async def get_school_overview(
         func.date_trunc('month', StudentResponse.completed_at).label('month'),
         func.count(StudentResponse.response_id).label('count'),
         func.avg(StudentResponse.score).label('avg_score')
-    ).join(Student, StudentResponse.student_id == Student.student_id)\
-     .filter(Student.school_id == school_id, StudentResponse.completed_at >= six_months_ago)\
+    ).join(Student, StudentResponse.student_id == User.user_id)\
+     .filter(User.school_id == school_id, StudentResponse.completed_at >= six_months_ago)\
      .group_by(text('1')).all()
 
     # Merge Data in Python
@@ -342,27 +344,27 @@ async def get_school_overview(
     
     # Count students per class
     class_student_counts = db.query(
-        Student.class_id, func.count(Student.student_id)
-    ).filter(Student.school_id == school_id).group_by(Student.class_id).all()
+        User.profile["class_id"].astext, func.count(User.user_id)
+    ).filter(User.school_id == school_id).group_by(User.profile["class_id"].astext).all()
     student_count_map = {c[0]: c[1] for c in class_student_counts}
     
     # Count at-risk students per class
     class_risk_counts = db.query(
-        Student.class_id, func.count(func.distinct(Student.student_id))
-    ).join(Case, Student.student_id == Case.student_id)\
+        User.profile["class_id"].astext, func.count(func.distinct(User.user_id))
+    ).join(Case, User.user_id == Case.student_id)\
      .filter(
-         Student.school_id == school_id,
+         User.school_id == school_id,
          Case.status != CaseStatus.CLOSED,
          Case.risk_level.in_([RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.CRITICAL])
-     ).group_by(Student.class_id).all()
+     ).group_by(User.profile["class_id"].astext).all()
     risk_count_map = {c[0]: c[1] for c in class_risk_counts}
     
     # Avg wellbeing per class
     class_wellbeing_scores = db.query(
-        Student.class_id, func.avg(StudentResponse.score)
-    ).join(StudentResponse, Student.student_id == StudentResponse.student_id)\
-     .filter(Student.school_id == school_id, StudentResponse.score.isnot(None))\
-     .group_by(Student.class_id).all()
+        User.profile["class_id"].astext, func.avg(StudentResponse.score)
+    ).join(StudentResponse, User.user_id == StudentResponse.student_id)\
+     .filter(User.school_id == school_id, StudentResponse.score.isnot(None))\
+     .group_by(User.profile["class_id"].astext).all()
     wellbeing_map = {c[0]: float(c[1] or 0) for c in class_wellbeing_scores}
 
     class_metrics = []
@@ -439,7 +441,7 @@ async def get_at_risk_students(
     """Get list of at-risk students with their case details"""
     
     # Get all students for this school
-    student_ids = [s.student_id for s in db.query(Student.student_id).filter(Student.school_id == school_id).all()]
+    student_ids = [s.user_id for s in db.query(User.user_id).filter(User.school_id == school_id).all()]
     
     # Query active cases with eager loading
     query = db.query(Case).options(
@@ -469,26 +471,33 @@ async def get_at_risk_students(
         student = case.student
         counsellor = counsellors_map.get(case.assigned_counsellor) if case.assigned_counsellor else None
         
-        # Get parent information from student record
+        # Get parent information from student's profile
         parents_data = []
-        if student.parent_email or student.parent_phone:
-            # Create a parent entry from student's parent fields
-            parent_info = {
-                "name": "Parent/Guardian",
-                "relationship": "Parent/Guardian",
-                "phone": student.parent_phone,
-                "email": student.parent_email,
-                "is_primary": True,
-                "consent_given": student.consent_status.value == "GRANTED" if student.consent_status else None
-            }
-            parents_data.append(parent_info)
+        if student and student.profile:
+            parent_email = student.profile.get("parent_email")
+            parent_phone = student.profile.get("parent_phone")
+            if parent_email or parent_phone:
+                parent_info = {
+                    "name": "Parent/Guardian",
+                    "relationship": "Parent/Guardian",
+                    "phone": parent_phone,
+                    "email": parent_email,
+                    "is_primary": True,
+                    "consent_given": student.profile.get("consent_status") == "GRANTED" if student.profile.get("consent_status") else None
+                }
+                parents_data.append(parent_info)
+        
+        # Get student info from profile
+        first_name = student.display_name.split()[0] if student and student.display_name else "Unknown"
+        last_name = " ".join(student.display_name.split()[1:]) if student and student.display_name and len(student.display_name.split()) > 1 else ""
+        class_id = student.profile.get("class_id") if student and student.profile else None
         
         result.append({
             "case_id": str(case.case_id),
             "student": {
-                "student_id": str(student.student_id),
-                "name": f"{student.first_name} {student.last_name}",
-                "class_id": str(student.class_id) if student.class_id else None
+                "student_id": str(student.user_id) if student else None,
+                "name": student.display_name if student else "Unknown",
+                "class_id": class_id
             },
             "risk_level": case.risk_level.value,
             "status": case.status.value,
@@ -576,12 +585,12 @@ async def get_grade_level_analysis(
             }
         
         # Count students in this class
-        students_count = db.query(Student).filter(Student.class_id == class_obj.class_id).count()
+        students_count = db.query(User).filter(User.role == UserRole.STUDENT).filter(User.profile["class_id"].astext == str(class_obj.class_id)).count()
         grade_data[grade]["total_students"] += students_count
         grade_data[grade]["total_classes"] += 1
         
         # Get student IDs for this class
-        student_ids = [s.student_id for s in db.query(Student.student_id).filter(Student.class_id == class_obj.class_id).all()]
+        student_ids = [s.user_id for s in db.query(User.user_id).filter(User.profile["class_id"].astext == str(class_obj.class_id)).all()]
         
         # Count active cases
         active_cases = db.query(Case).filter(
@@ -632,7 +641,7 @@ async def get_monthly_summary(
     end_date = datetime(year, month, last_day, 23, 59, 59)
     
     # Get all students for this school
-    student_ids = [s.student_id for s in db.query(Student.student_id).filter(Student.school_id == school_id).all()]
+    student_ids = [s.user_id for s in db.query(User.user_id).filter(User.school_id == school_id).all()]
     
     # Cases created this month
     cases_created = db.query(Case).filter(
